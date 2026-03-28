@@ -2718,32 +2718,41 @@ class BinanceAnalyzer:
                     final_confidence = "MEDIUM" if final_confidence == "ABSOLUTE" else final_confidence
                     final_reason += f" | Low volume ({volume_ratio:.2f}x) & OFI neutral → caution"
 
-            # ========== Compute floating PnL ==========
+            # ========== Compute floating PnL ===========
             floating_pnl = self.state_mgr.get_floating_pnl_pct(price)
 
-            # ========== FIXED Volume Filter: Jangan reverse jika bias sudah searah liquidity ==========
+            # ========== FIXED Volume Filter: Jangan reverse jika bias sudah searah liquidity atau sinyal HFT/Algo kuat ==========
             if final_bias in ["LONG", "SHORT"] and len(volumes_1m) >= 10:
                 if latest_volume < volume_ma10:
-                    # Determine liquidity direction
+                    # Tentukan arah liquidity
                     liquidity_bias = "LONG" if liq["short_dist"] < liq["long_dist"] else "SHORT"
-                    # Deteksi apakah kita berada di zona squeeze (likuiditas dekat)
-                    is_near_liquidity = liq["short_dist"] < LIQ_SQUEEZE_THRESHOLD or liq["long_dist"] < LIQ_SQUEEZE_THRESHOLD
+                    # Cek apakah HFT dan Algo Type konsisten (sama dan tidak netral)
+                    hft_algo_agree = (hft_6pct["bias"] == algo_type["bias"] and hft_6pct["bias"] != "NEUTRAL")
+                    # Gabungkan dengan sinyal kuat yang sudah ada
+                    is_strong = self._is_strong_signal(ofi, up_energy, down_energy, change_5m, rsi6) or hft_algo_agree
+
+                    # Jangan reverse jika ada sinyal kuat
+                    if is_strong:
+                        final_reason += f" | Volume low but strong signal (HFT+Algo agree) → holding"
                     # Jangan reverse jika bias sudah searah liquidity
-                    if final_bias == liquidity_bias:
+                    elif final_bias == liquidity_bias:
                         final_reason += f" | Volume low but aligned with liquidity ({liquidity_bias}) → holding"
-                    elif not self._is_strong_signal(ofi, up_energy, down_energy, change_5m, rsi6) and not is_near_liquidity:
-                        original_bias = final_bias
-                        final_bias = "LONG" if original_bias == "SHORT" else "SHORT"
-                        final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} → reverse from {original_bias} to {final_bias}"
-                        final_confidence = "ABSOLUTE"
-                        final_phase = "VOLUME_FILTER_REVERSE"
-                    elif is_near_liquidity:
-                        # Jika volume rendah tapi dekat liq, pertahankan arah liq (squeeze play)
-                        final_reason += f" | Volume Low but Near Liquidity ({liq['short_dist']}%/{liq['long_dist']}%) → Hold Squeeze Bias"
-                        if final_confidence == "ABSOLUTE":
-                            final_confidence = "HIGH"
                     else:
-                        final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} (warning, but signal strong)"
+                        # Deteksi apakah di zona squeeze (likuiditas dekat)
+                        is_near_liquidity = liq["short_dist"] < LIQ_SQUEEZE_THRESHOLD or liq["long_dist"] < LIQ_SQUEEZE_THRESHOLD
+                        if not is_near_liquidity:
+                            original_bias = final_bias
+                            final_bias = "LONG" if original_bias == "SHORT" else "SHORT"
+                            final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} → reverse from {original_bias} to {final_bias}"
+                            final_confidence = "ABSOLUTE"
+                            final_phase = "VOLUME_FILTER_REVERSE"
+                        else:
+                            final_reason += f" | Volume Low but Near Liquidity ({liq['short_dist']}%/{liq['long_dist']}%) → Hold Squeeze Bias"
+                            if final_confidence == "ABSOLUTE":
+                                final_confidence = "HIGH"
+                else:
+                    # Jika volume tidak rendah, hanya beri warning jika perlu
+                    final_reason += f" | Volume {latest_volume:.2f} >= MA10 {volume_ma10:.2f} (normal)"
 
             # ========== Low Cap Mode ==========
             if latest_volume < LOW_CAP_VOLUME_THRESHOLD:
