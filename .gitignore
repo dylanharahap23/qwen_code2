@@ -15,19 +15,19 @@ venv/
 # Logs
 *.log
 
-# Temporary files
-*.tmp
-*.swp
-*.swo
-
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
 # Editors
 .vscode/
 .idea/
+*.swp
+*.swo
+
+# Dependencies
+node_modules/
+.mypy_cache/
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
 
 # Build artifacts
 dist/
