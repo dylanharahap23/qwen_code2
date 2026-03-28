@@ -422,6 +422,10 @@ class OversoldSqueezeTrap:
 class EmptyBookTrapDetector:
     @staticmethod
     def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float) -> Dict:
+        # Jika short liq sudah sangat dekat (<0.5%), squeeze sudah habis → jangan override LONG
+        if short_dist < 0.5:
+            return {"override": False}
+        
         # Jika down energy 0 (no bids) dan short liq dekat, tetapi long liq lebih dekat → jangan LONG
         if down_energy < 0.1 and short_dist < 2.0:
             if long_dist < short_dist:
@@ -432,9 +436,13 @@ class EmptyBookTrapDetector:
                 "reason": f"Empty Book Trap: No bid support ({down_energy:.2f}) + Short Liq dekat ({short_dist:.2f}%) → Rawan Short Squeeze",
                 "priority": -260
             }
+        
         # Jika up energy 0 (no asks) dan long liq dekat, tetapi short liq lebih dekat → jangan SHORT
         if up_energy < 0.1 and long_dist < 2.0:
             if short_dist < long_dist:
+                return {"override": False}
+            # Juga cek apakah long liq exhausted
+            if long_dist < 0.5:
                 return {"override": False}
             return {
                 "override": True,
