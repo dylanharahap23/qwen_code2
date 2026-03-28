@@ -1234,17 +1234,44 @@ class EnergyTrapFilter:
 class ThinOrderBookPump:
     @staticmethod
     def detect(up_energy: float, down_energy: float, price_change_5m: float,
-               volume_ratio: float, ofi_bias: str, ofi_strength: float) -> Dict:
+               volume_ratio: float, ofi_bias: str, ofi_strength: float,
+               short_liq: float) -> Dict:
+        # Modified: only trigger if short liq is relatively close (<5%) to confirm valid squeeze
         if (down_energy < ENERGY_ZERO_THRESHOLD and up_energy > 0 and
             price_change_5m > 1.0 and volume_ratio < 1.0 and
-            ofi_bias == "LONG" and ofi_strength > 0):
+            ofi_bias == "LONG" and ofi_strength > 0 and
+            short_liq < 5.0):   # tambahan: hanya jika short liq relatif dekat
             return {
                 "override": True,
                 "bias": "LONG",
-                "reason": f"Thin order book pump: down_energy {down_energy:.2f} but price rising and OFI bullish → no sellers to stop the pump",
+                "reason": f"Thin order book pump: down_energy {down_energy:.2f} but price rising and OFI bullish → no sellers to stop the pump, short liq {short_liq}% close",
                 "priority": -217
             }
         return {"override": False, "priority": 0}
+
+class PumpExhaustionTrap:
+    """
+    🔥 NEW: Detects thin pumps that are likely reversal traps.
+    Based on lecturer's feedback: pump with low volume, no sellers (down_energy=0),
+    but long liq is closer than short liq → HFT will reverse to grab long liquidations.
+    Priority -216: between ThinOrderBookPump (-217) and EnergyTrap (-217)
+    """
+    @staticmethod
+    def detect(change_5m: float, volume_ratio: float, down_energy: float,
+               long_liq: float, short_liq: float, rsi6: float) -> Dict:
+        # Pump dengan volume rendah, no sellers, dan long liq lebih dekat dari short liq
+        if (change_5m > 1.0 and
+            volume_ratio < 0.7 and
+            down_energy < 0.01 and
+            long_liq < short_liq and
+            rsi6 < 75):  # tidak overbought ekstrim, tapi sudah naik
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Pump exhaustion trap: naik {change_5m:.1f}% dengan volume {volume_ratio:.2f}x, down_energy=0 tapi long liq {long_liq}% < short liq {short_liq}% → reversal untuk ambil long liq",
+                "priority": -216   # di antara ThinOrderBookPump (-217) dan EnergyTrap (-217) dll
+            }
+        return {"override": False}
 
 class HFTTrapDetector:
     @staticmethod
@@ -2440,7 +2467,7 @@ class BinanceAnalyzer:
                                                                                                     prob_engine.add(energy_imbalance["bias"], 3.0)
                                                                                                 else:
                                                                                                     thin_pump = ThinOrderBookPump.detect(up_energy, down_energy, change_5m, volume_ratio,
-                                                                                                                                         ofi["bias"], ofi["strength"])
+                                                                                                                                         ofi["bias"], ofi["strength"], liq["short_dist"])
                                                                                                     if thin_pump["override"]:
                                                                                                         final_bias = thin_pump["bias"]
                                                                                                         final_reason = thin_pump["reason"]
@@ -2449,16 +2476,27 @@ class BinanceAnalyzer:
                                                                                                         priority = thin_pump["priority"]
                                                                                                         prob_engine.add(thin_pump["bias"], 3.0)
                                                                                                     else:
-                                                                                                        energy_trap = EnergyTrapFilter.detect(up_energy, down_energy, change_5m, volume_ratio, rsi14)
-                                                                                                        if energy_trap["override"]:
-                                                                                                            final_bias = energy_trap["bias"]
-                                                                                                            final_reason = energy_trap["reason"]
+                                                                                                        # NEW: PumpExhaustionTrap - detect thin pump reversal traps
+                                                                                                        pump_exhaust = PumpExhaustionTrap.detect(change_5m, volume_ratio, down_energy,
+                                                                                                                                                 liq["long_dist"], liq["short_dist"], rsi6)
+                                                                                                        if pump_exhaust["override"]:
+                                                                                                            final_bias = pump_exhaust["bias"]
+                                                                                                            final_reason = pump_exhaust["reason"]
                                                                                                             final_confidence = "ABSOLUTE"
-                                                                                                            final_phase = "ENERGY_TRAP"
-                                                                                                            priority = energy_trap["priority"]
-                                                                                                            prob_engine.add(energy_trap["bias"], 3.0)
+                                                                                                            final_phase = "PUMP_EXHAUSTION_TRAP"
+                                                                                                            priority = pump_exhaust["priority"]
+                                                                                                            prob_engine.add(pump_exhaust["bias"], 3.0)
                                                                                                         else:
-                                                                                                            energy_gap = EnergyGapTrapDetector.detect(rsi14, up_energy, down_energy)
+                                                                                                            energy_trap = EnergyTrapFilter.detect(up_energy, down_energy, change_5m, volume_ratio, rsi14)
+                                                                                                            if energy_trap["override"]:
+                                                                                                                final_bias = energy_trap["bias"]
+                                                                                                                final_reason = energy_trap["reason"]
+                                                                                                                final_confidence = "ABSOLUTE"
+                                                                                                                final_phase = "ENERGY_TRAP"
+                                                                                                                priority = energy_trap["priority"]
+                                                                                                                prob_engine.add(energy_trap["bias"], 3.0)
+                                                                                                            else:
+                                                                                                                energy_gap = EnergyGapTrapDetector.detect(rsi14, up_energy, down_energy)
                                                                                                             if energy_gap["override"]:
                                                                                                                 final_bias = energy_gap["bias"]
                                                                                                                 final_reason = energy_gap["reason"]
