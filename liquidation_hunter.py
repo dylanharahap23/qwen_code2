@@ -2224,7 +2224,14 @@ class BinanceAnalyzer:
                         prob_engine = ProbabilisticEngine()
                         algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}  # default
                         hft_6pct = {"bias": "NEUTRAL", "reason": ""}            # default
-                        dead_market = {"override": False}  # default initialization to prevent UnboundLocalError
+                        
+                        # Initialize all variables that might not be defined in certain branches
+                        # to prevent UnboundLocalError
+                        dead_market = {"override": False}
+                        flush = {"wait": False}
+                        energy_gap = {"override": False}
+                        energy_trap = {"override": False}
+                        pump_exhaust = {"override": False}
 
                         # ========== HIGH PRIORITY OVERRIDES (with priority order) ==========
                         # Priority ladder (highest to lowest):
