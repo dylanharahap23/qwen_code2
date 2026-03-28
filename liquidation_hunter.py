@@ -341,13 +341,20 @@ class TimeDecayFilter:
 # ================= NEW DETECTOR FROM MENTOR (Overbought/Oversold Traps) =================
 class OverboughtDistributionTrap:
     @staticmethod
-    def detect(rsi6: float, short_dist: float, volume_ratio: float,
+    def detect(rsi6: float, short_dist: float, long_dist: float, volume_ratio: float,
                down_energy: float, up_energy: float, ofi_bias: str,
                ofi_strength: float, change_5m: float) -> Dict:
         """
         Mendeteksi perangkap distribusi ketika market overbought namun ada sinyal LONG palsu.
         Priority lebih tinggi dari Empty Book Trap (-261 vs -260).
+        
+        NEW: Tidak override jika short liq sangat dekat (<2%) dan lebih dekat dari long liq
+        → liquidity mengarah LONG, jangan SHORT.
         """
+        # Jika short liq sangat dekat dan lebih dekat dari long liq → liquidity mengarah LONG, jangan SHORT
+        if short_dist < 2.0 and short_dist < long_dist:
+            return {"override": False}
+        
         # Kasus 1: Overbought + short liq dekat + volume rendah + tidak ada bid support
         if (rsi6 > 70 and
             short_dist < 2.0 and
@@ -385,9 +392,20 @@ class OverboughtDistributionTrap:
 
 class OversoldSqueezeTrap:
     @staticmethod
-    def detect(rsi6: float, long_dist: float, volume_ratio: float,
+    def detect(rsi6: float, long_dist: float, short_dist: float, volume_ratio: float,
                up_energy: float, down_energy: float, ofi_bias: str,
                ofi_strength: float, change_5m: float) -> Dict:
+        """
+        Mendeteksi perangkap squeeze ketika market oversold namun ada sinyal SHORT palsu.
+        Priority lebih tinggi dari Empty Book Trap (-261 vs -260).
+        
+        NEW: Tidak override jika long liq sangat dekat (<2%) dan lebih dekat dari short liq
+        → liquidity mengarah SHORT, jangan LONG.
+        """
+        # Jika long liq sangat dekat dan lebih dekat dari short liq → liquidity mengarah SHORT, jangan LONG
+        if long_dist < 2.0 and long_dist < short_dist:
+            return {"override": False}
+        
         if (rsi6 < 30 and
             long_dist < 2.0 and
             volume_ratio < 0.8 and
@@ -2166,7 +2184,7 @@ class BinanceAnalyzer:
 
             # ========== NEW: Overbought / Oversold Distribution Traps (Priority -261) ==========
             overbought_trap = OverboughtDistributionTrap.detect(
-                rsi6, liq["short_dist"], volume_ratio,
+                rsi6, liq["short_dist"], liq["long_dist"], volume_ratio,
                 down_energy, up_energy, ofi["bias"], ofi["strength"], change_5m
             )
             if overbought_trap["override"]:
@@ -2180,7 +2198,7 @@ class BinanceAnalyzer:
                 hft_6pct = {"bias": "NEUTRAL", "reason": ""}
             else:
                 oversold_trap = OversoldSqueezeTrap.detect(
-                    rsi6, liq["long_dist"], volume_ratio,
+                    rsi6, liq["long_dist"], liq["short_dist"], volume_ratio,
                     up_energy, down_energy, ofi["bias"], ofi["strength"], change_5m
                 )
                 if oversold_trap["override"]:
