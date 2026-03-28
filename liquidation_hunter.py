@@ -670,31 +670,33 @@ class LiquidityProximityStrict:
 
 class LiquidityMagnetOverride:
     """
-    💎 FORCE DIRECTION BASED ON LIQUIDITY MAGNET WHEN CLOSE (<2.5%) AND LOW VOLUME
-    Priority -1075 (between StrictLiquidity -1050 and MasterSqueeze -1100)
-    This overrides conflicting signals from OFI/HFT when short liq is dangerously close.
+    💎 FORCE DIRECTION BASED ON LIQUIDITY MAGNET WHEN CLOSE (<3%) AND VOLUME LOW (<0.7x)
+    Priority -1075, above OverboughtDistributionTrap (-261).
     
-    Case study: BASUSDT - short liq = 2.27% < 2.5%, volume_ratio = 0.28 < 0.5 → FORCE LONG
-    Even if RSI overbought, OFI SHORT, HFT SHORT, liquidity magnet dominates in low volume squeeze play.
+    Case studies:
+    - NOMUSDT: short_dist = 2.38% (<3), volume_ratio = 0.59 (<0.7), short_dist < long_dist → override ke LONG (+8%)
+    - ARIAUSDT: short_dist = 2.06% (<3), volume_ratio = 0.51 (<0.7), short_dist < long_dist → override ke LONG
+    - BASUSDT: short_dist = 2.27% (<3), volume_ratio = 0.28 (<0.7), short_dist < long_dist → override ke LONG (+8%)
+    
+    Threshold lebih luas dari versi sebelumnya (2.5%→3%, 0.5x→0.7x) untuk menangkap lebih banyak squeeze plays.
     """
     @staticmethod
     def detect(short_dist: float, long_dist: float, volume_ratio: float,
                rsi6_5m: float, change_5m: float) -> Dict:
-        # SHORT LIQ VERY CLOSE (<2.5%) AND VOLUME LOW (<0.5x) → FORCE LONG
-        if short_dist < 2.5 and volume_ratio < 0.5:
-            # Even if RSI overbought, liquidity magnet still dominates in low volume
+        # SHORT LIQ CLOSE (<3%) AND VOLUME LOW (<0.7) AND SHORT LIQ CLOSER → FORCE LONG
+        if short_dist < 3.0 and volume_ratio < 0.7 and short_dist < long_dist:
             return {
                 "override": True,
                 "bias": "LONG",
-                "reason": f"Liquidity magnet override: short liq {short_dist:.2f}% sangat dekat dengan volume {volume_ratio:.2f}x → force LONG (HFT will sweep short stops before dump)",
+                "reason": f"Liquidity squeeze override: short liq {short_dist:.2f}% dekat dengan volume {volume_ratio:.2f}x, lebih dekat dari long liq → force LONG (HFT will sweep short stops)",
                 "priority": -1075
             }
-        # LONG LIQ VERY CLOSE (<2.5%) AND VOLUME LOW (<0.5x) → FORCE SHORT
-        if long_dist < 2.5 and volume_ratio < 0.5:
+        # LONG LIQ CLOSE (<3%) AND VOLUME LOW (<0.7) AND LONG LIQ CLOSER → FORCE SHORT
+        if long_dist < 3.0 and volume_ratio < 0.7 and long_dist < short_dist:
             return {
                 "override": True,
                 "bias": "SHORT",
-                "reason": f"Liquidity magnet override: long liq {long_dist:.2f}% sangat dekat dengan volume {volume_ratio:.2f}x → force SHORT (HFT will dump to sweep long stops before pump)",
+                "reason": f"Liquidity squeeze override: long liq {long_dist:.2f}% dekat dengan volume {volume_ratio:.2f}x, lebih dekat dari short liq → force SHORT (HFT will dump to sweep long stops)",
                 "priority": -1075
             }
         return {"override": False}
@@ -2307,7 +2309,9 @@ class BinanceAnalyzer:
                                 prob_engine.add(strict_liq["bias"], 9.5)
                             else:
                                 # 1.6. LIQUIDITY MAGNET OVERRIDE (Priority -1075)
-                                # NEW: Force direction based on liquidity magnet when close (<2.5%) and low volume
+                                # NEW: Force direction based on liquidity magnet when close (<3%) and low volume (<0.7x)
+                                # Threshold diperluas dari 2.5%/0.5x menjadi 3%/0.7x untuk menangkap lebih banyak squeeze plays
+                                # Case studies: NOMUSDT (+8%), ARIAUSDT, BASUSDT (+8%)
                                 liq_magnet_override = LiquidityMagnetOverride.detect(
                                     liq["short_dist"], liq["long_dist"], volume_ratio,
                                     rsi6_5m, change_5m
