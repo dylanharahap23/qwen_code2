@@ -667,6 +667,39 @@ class LiquidityProximityStrict:
                 }
         return {"override": False}
 
+
+class LiquidityMagnetOverride:
+    """
+    💎 FORCE DIRECTION BASED ON LIQUIDITY MAGNET WHEN CLOSE (<2.5%) AND LOW VOLUME
+    Priority -1075 (between StrictLiquidity -1050 and MasterSqueeze -1100)
+    This overrides conflicting signals from OFI/HFT when short liq is dangerously close.
+    
+    Case study: BASUSDT - short liq = 2.27% < 2.5%, volume_ratio = 0.28 < 0.5 → FORCE LONG
+    Even if RSI overbought, OFI SHORT, HFT SHORT, liquidity magnet dominates in low volume squeeze play.
+    """
+    @staticmethod
+    def detect(short_dist: float, long_dist: float, volume_ratio: float,
+               rsi6_5m: float, change_5m: float) -> Dict:
+        # SHORT LIQ VERY CLOSE (<2.5%) AND VOLUME LOW (<0.5x) → FORCE LONG
+        if short_dist < 2.5 and volume_ratio < 0.5:
+            # Even if RSI overbought, liquidity magnet still dominates in low volume
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Liquidity magnet override: short liq {short_dist:.2f}% sangat dekat dengan volume {volume_ratio:.2f}x → force LONG (HFT will sweep short stops before dump)",
+                "priority": -1075
+            }
+        # LONG LIQ VERY CLOSE (<2.5%) AND VOLUME LOW (<0.5x) → FORCE SHORT
+        if long_dist < 2.5 and volume_ratio < 0.5:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Liquidity magnet override: long liq {long_dist:.2f}% sangat dekat dengan volume {volume_ratio:.2f}x → force SHORT (HFT will dump to sweep long stops before pump)",
+                "priority": -1075
+            }
+        return {"override": False}
+
+
 class FlushExhaustionReversal:
     """
     🚀 Detects sharp drop with oversold, low volume, and no sellers → bounce.
@@ -2240,6 +2273,8 @@ class BinanceAnalyzer:
                         # ========== HIGH PRIORITY OVERRIDES (with priority order) ==========
                         # Priority ladder (highest to lowest):
                         # -1100: MasterSqueezeRule (GOLDEN RULE)
+                        # -1075: LiquidityMagnetOverride (NEW: LIQ MAGNET OVERRIDE FOR LOW VOLUME SQUEEZE)
+                        # -1050: StrictLiquidityProximity
                         # -1000: LiquidityMagnetContinuation (LIQ MAGNET LAYER)
                         # -950: OFIAbsorptionSqueeze (ABSORPTION/FAKE OFI LAYER)
                         # -900: VelocityDecayReversal (REVERSAL CONFIRMATION)
@@ -2271,10 +2306,24 @@ class BinanceAnalyzer:
                                 priority = strict_liq["priority"]
                                 prob_engine.add(strict_liq["bias"], 9.5)
                             else:
-                                # 2. LIQUIDITY MAGNET CONTINUATION (Priority -1000)
-                                liq_magnet = LiquidityMagnetContinuation.detect(
-                                    liq["short_dist"], liq["long_dist"], change_5m,
-                                    up_energy, down_energy, volume_ratio
+                                # 1.6. LIQUIDITY MAGNET OVERRIDE (Priority -1075)
+                                # NEW: Force direction based on liquidity magnet when close (<2.5%) and low volume
+                                liq_magnet_override = LiquidityMagnetOverride.detect(
+                                    liq["short_dist"], liq["long_dist"], volume_ratio,
+                                    rsi6_5m, change_5m
+                                )
+                                if liq_magnet_override["override"]:
+                                    final_bias = liq_magnet_override["bias"]
+                                    final_reason = liq_magnet_override["reason"]
+                                    final_confidence = "ABSOLUTE"
+                                    final_phase = "LIQUIDITY_MAGNET_OVERRIDE"
+                                    priority = liq_magnet_override["priority"]
+                                    prob_engine.add(liq_magnet_override["bias"], 9.8)  # weight sangat tinggi
+                                else:
+                                    # 2. LIQUIDITY MAGNET CONTINUATION (Priority -1000)
+                                    liq_magnet = LiquidityMagnetContinuation.detect(
+                                        liq["short_dist"], liq["long_dist"], change_5m,
+                                        up_energy, down_energy, volume_ratio
                                 )
                                 if liq_magnet["override"]:
                                     final_bias = liq_magnet["bias"]
