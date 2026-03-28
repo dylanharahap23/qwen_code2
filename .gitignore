@@ -15,12 +15,22 @@ venv/
 # Logs
 *.log
 
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
 # Coverage
 .coverage
 coverage/
 htmlcov/
 
-# Testing
-.pytest_cache/
-.mypy_cache/
+# Editors
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+build/
+target/
 ```

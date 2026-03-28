@@ -2271,6 +2271,7 @@ class BinanceAnalyzer:
                         energy_gap = {"override": False}
                         energy_trap = {"override": False}
                         pump_exhaust = {"override": False}
+                        liq_magnet = {"override": False}          # <-- TAMBAHKAN untuk fix UnboundLocalError
 
                         # ========== HIGH PRIORITY OVERRIDES (with priority order) ==========
                         # Priority ladder (highest to lowest):
