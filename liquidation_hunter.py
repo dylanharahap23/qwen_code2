@@ -422,16 +422,20 @@ class OversoldSqueezeTrap:
 class EmptyBookTrapDetector:
     @staticmethod
     def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float) -> Dict:
-        # Jika down energy 0 (no bids) tapi short liq dekat, itu trap untuk SHORTER
+        # Jika down energy 0 (no bids) dan short liq dekat, tetapi long liq lebih dekat → jangan LONG
         if down_energy < 0.1 and short_dist < 2.0:
+            if long_dist < short_dist:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "LONG",
                 "reason": f"Empty Book Trap: No bid support ({down_energy:.2f}) + Short Liq dekat ({short_dist:.2f}%) → Rawan Short Squeeze",
-                "priority": -260  # Priority sangat tinggi
+                "priority": -260
             }
-        # Jika up energy 0 (no asks) tapi long liq dekat, itu trap untuk LONGER
+        # Jika up energy 0 (no asks) dan long liq dekat, tetapi short liq lebih dekat → jangan SHORT
         if up_energy < 0.1 and long_dist < 2.0:
+            if short_dist < long_dist:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
@@ -2757,6 +2761,12 @@ class BinanceAnalyzer:
                     # Gabungkan dengan sinyal kuat yang sudah ada
                     is_strong = self._is_strong_signal(ofi, up_energy, down_energy, change_5m, rsi6) or hft_algo_agree
 
+                    # --- Tambahan: jika volume sangat rendah dan RSI 5m oversold/overbought, jangan reverse ---
+                    if volume_ratio < 0.5 and (rsi6_5m < 30 or rsi6_5m > 70):
+                        is_strong = True   # Anggap sinyal kuat, jangan reverse
+                        final_reason += f" | Very low volume with extreme RSI5m ({rsi6_5m:.1f}) → holding"
+                    # ------------------------------------------------------------------------
+
                     # Jangan reverse jika ada sinyal kuat
                     if is_strong:
                         final_reason += f" | Volume low but strong signal (HFT+Algo agree) → holding"
@@ -2782,19 +2792,28 @@ class BinanceAnalyzer:
 
             # ========== Low Cap Mode ==========
             if latest_volume < LOW_CAP_VOLUME_THRESHOLD:
-                # Aktifkan mode sniper squeeze: fokus pada likuiditas dan order book
                 final_reason += " | Low cap mode activated: prioritizing liquidity"
-                # Jika sudah dekat likuiditas, pastikan arah mengikuti liq
-                if liq["short_dist"] < liq["long_dist"]:
-                    if final_bias != "LONG":
-                        final_bias = "LONG"
-                        final_reason = f"Low cap mode: overriding to LONG (short liq closer)"
+                # Cek double sweep: kedua likuiditas dekat
+                if liq["short_dist"] < 2.0 and liq["long_dist"] < 2.0:
+                    final_bias = "WAIT"
+                    final_reason = f"Low cap mode: double sweep zone (short liq {liq['short_dist']}%, long liq {liq['long_dist']}%) → waiting"
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "LOW_CAP_DOUBLE_SWEEP"
                 else:
-                    if final_bias != "SHORT":
-                        final_bias = "SHORT"
-                        final_reason = f"Low cap mode: overriding to SHORT (long liq closer)"
-                final_confidence = "ABSOLUTE"
-                final_phase = "LOW_CAP_SNIPER"
+                    # Jangan override jika volume sangat rendah dan RSI5m oversold/overbought
+                    if volume_ratio < 0.5 and (rsi6_5m < 30 or rsi6_5m > 70):
+                        final_reason += f" | Low cap but extreme RSI5m ({rsi6_5m:.1f}) → skip liquidity override"
+                    else:
+                        if liq["short_dist"] < liq["long_dist"]:
+                            if final_bias != "LONG":
+                                final_bias = "LONG"
+                                final_reason = f"Low cap mode: overriding to LONG (short liq closer)"
+                        else:
+                            if final_bias != "SHORT":
+                                final_bias = "SHORT"
+                                final_reason = f"Low cap mode: overriding to SHORT (long liq closer)"
+                        final_confidence = "ABSOLUTE"
+                        final_phase = "LOW_CAP_SNIPER"
 
             # Latency compensator
             final_bias = self.latency_comp.adjust_signal(final_bias, self.last_latency)
