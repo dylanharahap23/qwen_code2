@@ -1,0 +1,2759 @@
+#!/usr/bin/env python3
+"""
+🔥 BINANCE LIQUIDATION HUNTER - ULTIMATE EDITION v8 (LIQUIDITY SQUEEZE FOCUS)
+🎯 Fixed: floating_pnl definition, algo_type/hft_6pct defaults.
+🎯 Added: SqueezeContinuationDetector to catch short squeeze continuation.
+"""
+
+import requests
+from datetime import datetime
+import urllib3
+import numpy as np
+from typing import Optional, Dict, List, Tuple, Any
+import time
+import json
+import threading
+import websocket
+import os
+from collections import deque
+
+# Nonaktifkan SSL warning
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# ================= CONFIG =================
+IS_KOYEB = os.getenv('KOYEB', 'false').lower() == 'true'
+
+WMI_STRONG_THRESHOLD = 50
+WMI_MODERATE_THRESHOLD = 20
+ENERGY_RATIO_THRESHOLD = 10.0
+VACUUM_VOLUME_THRESHOLD = 0.1
+DEAD_AGG_THRESHOLD = 0.2
+DEAD_FLOW_THRESHOLD = 0.5
+LIQ_PROXIMITY_THRESHOLD = 0.5
+OVERBOUGHT_RSI = 80
+OI_DELTA_THRESHOLD = 0.5
+FLUSH_ZONE_THRESHOLD = 0.5
+FLUSH_AGG_THRESHOLD = 0.2
+VOTE_THRESHOLD = 0.65
+TARGET_MOVE_PCT = 6.0
+STOP_LOSS_PCT = 8.0
+MIN_ENERGY_TO_MOVE = 0.5
+ENERGY_ZERO_THRESHOLD = 0.01
+EXTREME_OVERSOLD_RSI = 15
+EXTREME_OVERSOLD_STOCH = 15
+PANIC_DROP_THRESHOLD = -8.0
+MAX_LATENCY_MS = 500
+PERSISTENCE_THRESHOLD = 2.0        # Minimal floating PnL sebelum flip
+TRADES_MAXLEN = 200 if IS_KOYEB else 1000
+DEFAULT_TIMEOUT = 10
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+# NEW CONFIG
+SIGNAL_PERSISTENCE_SEC = 2.5        # Time decay for signal flipping
+LATENCY_MS_ESTIMATE = 150           # Default latency for arb predictor
+LIQ_SQUEEZE_THRESHOLD = 1.5         # If liq < 1.5%, squeeze zone
+LOW_CAP_VOLUME_THRESHOLD = 100000   # Absolute volume threshold for low‑cap mode
+
+# ================= STABILITY FILTER GLOBAL =================
+LAST_BIAS = None          # last directional bias (LONG/SHORT)
+LAST_BIAS_TIME = 0        # timestamp when LAST_BIAS was set
+
+# ================= TIME DECAY GLOBAL =================
+LAST_SIGNAL = None
+LAST_SIGNAL_TIME = 0
+
+# ================= HELPER FUNCTIONS =================
+def safe_get(data, key, default=None):
+    try:
+        if isinstance(data, dict):
+            return data.get(key, default)
+        return default
+    except:
+        return default
+
+def safe_float(val, default=0.0):
+    try:
+        if val is None:
+            return default
+        return float(val)
+    except:
+        return default
+
+def safe_div(a, b, default=1.0):
+    try:
+        if b == 0 or b is None:
+            return default
+        return a / b
+    except:
+        return default
+
+# ================= WEBSOCKET CONNECTOR (unchanged) =================
+class BinanceWebSocket:
+    """Real-time WebSocket for order book and trades"""
+    def __init__(self, symbol: str):
+        self.symbol = symbol.lower()
+        self.ws_url = f"wss://fstream.binance.com/ws/{self.symbol}@depth20@100ms/{self.symbol}@trade"
+        self.ws = None
+        self.order_book = {}
+        self.trades = deque(maxlen=TRADES_MAXLEN)
+        self.lock = threading.Lock()
+        self.connected = False
+        self.last_update = time.time()
+        self.thread = None
+
+    def on_message(self, ws, message):
+        data = json.loads(message)
+        now = time.time()
+        self.last_update = now
+        with self.lock:
+            if 'bids' in data:
+                self.order_book = data
+            elif 's' in data:
+                self.trades.append(data)
+
+    def on_error(self, ws, error):
+        print(f"WebSocket error: {error}")
+        self.connected = False
+
+    def on_close(self, ws, close_status_code, close_msg):
+        self.connected = False
+
+    def on_open(self, ws):
+        self.connected = True
+
+    def start(self):
+        self.ws = websocket.WebSocketApp(self.ws_url,
+                                         on_open=self.on_open,
+                                         on_message=self.on_message,
+                                         on_error=self.on_error,
+                                         on_close=self.on_close)
+        self.thread = threading.Thread(target=self.ws.run_forever)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def stop(self):
+        if self.ws:
+            self.ws.close()
+        self.connected = False
+
+    def get_latest(self):
+        with self.lock:
+            return {
+                "order_book": self.order_book.copy() if self.order_book else {},
+                "trades": list(self.trades),
+                "last_update": self.last_update
+            }
+
+# ================= NEW DETECTOR MODULES =================
+
+class LowVolumeContinuation:
+    @staticmethod
+    def detect(volume_ratio: float, obv_trend: str, price: float,
+               ma25: float, ma99: float, down_energy: float) -> Dict:
+        """Low volume continuation → force SHORT (block fake reversals)"""
+        if (volume_ratio < 0.6 and
+            obv_trend == "NEGATIVE_EXTREME" and
+            price < ma25 and price < ma99):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": "Low volume continuation: no buyers → dump easier",
+                "priority": -230
+            }
+        return {"override": False}
+
+class AntiReversalGuard:
+    @staticmethod
+    def should_block(obv_trend: str, rsi6: float, volume_ratio: float) -> bool:
+        """Block any LONG reversal when conditions are extreme bearish"""
+        if (obv_trend == "NEGATIVE_EXTREME" and
+            rsi6 < 30 and
+            volume_ratio < 0.7):
+            return True
+        return False
+
+class CascadeDumpDetector:
+    @staticmethod
+    def detect(change_5m: float, short_liq: float, down_energy: float,
+               volume_ratio: float) -> Dict:
+        """Detect cascade dump with no support"""
+        if (change_5m < -3 and
+            short_liq > 10 and
+            down_energy < 0.05 and
+            volume_ratio < 0.7):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": "Cascade dump: no support + high liq target",
+                "priority": -240
+            }
+        return {"override": False}
+
+class FakeBounceTrap:
+    @staticmethod
+    def detect(rsi6: float, change_5m: float, volume_ratio: float,
+               short_dist: float, long_dist: float,
+               up_energy: float, down_energy: float,
+               ofi_bias: str, ofi_strength: float) -> Dict:
+        """Detect fake pump to trap longs"""
+        if (rsi6 < 35 and
+            change_5m > 1.0 and
+            volume_ratio < 0.7 and
+            short_dist > long_dist and
+            down_energy < up_energy * 0.3 and
+            ofi_bias == "LONG" and ofi_strength > 0.3):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": "Fake bounce: weak pump to trap longs → dump incoming",
+                "priority": -235
+            }
+        return {"override": False}
+
+class OrderBookSlope:
+    @staticmethod
+    def calculate(order_book: Dict) -> Tuple[float, float]:
+        """Compute bid and ask slopes from top 10 levels"""
+        if not order_book or not order_book.get("bids") or not order_book.get("asks"):
+            return 0.0, 0.0
+
+        bids = order_book["bids"][:10]
+        asks = order_book["asks"][:10]
+
+        bid_slope = 0.0
+        ask_slope = 0.0
+
+        for i in range(1, len(bids)):
+            price_diff = bids[0][0] - bids[i][0]
+            volume = bids[i][1]
+            if price_diff > 0:
+                bid_slope += volume / price_diff
+
+        for i in range(1, len(asks)):
+            price_diff = asks[i][0] - asks[0][0]
+            volume = asks[i][1]
+            if price_diff > 0:
+                ask_slope += volume / price_diff
+
+        return bid_slope, ask_slope
+
+    @staticmethod
+    def signal(bid_slope: float, ask_slope: float) -> Dict:
+        """Return slope bias if one side is significantly stronger"""
+        if bid_slope > ask_slope * 2:
+            return {"bias": "SHORT", "reason": "Strong bid wall → resistance above"}
+        if ask_slope > bid_slope * 2:
+            return {"bias": "LONG", "reason": "Thin asks → easy pump"}
+        return {"bias": "NEUTRAL", "reason": "Balanced order book"}
+
+class LatencyArbitragePredictor:
+    @staticmethod
+    def predict_next_price(price: float, change_5m: float, up_energy: float,
+                           down_energy: float, latency_ms: float) -> float:
+        """Estimate current price based on latency"""
+        # Velocity per ms
+        velocity = change_5m / 300000.0  # 5 minutes = 300k ms
+
+        # Adjust for energy imbalance
+        if down_energy < up_energy:
+            velocity *= 1.5
+        elif up_energy < down_energy:
+            velocity *= 1.5
+
+        predicted = price * (1.0 + velocity * latency_ms)
+        return predicted
+
+    @staticmethod
+    def is_safe(bias: str, current_price: float, predicted_price: float) -> bool:
+        """Check if bias is still valid given predicted price"""
+        if bias == "LONG" and predicted_price < current_price * 0.99:
+            return False
+        if bias == "SHORT" and predicted_price > current_price * 1.01:
+            return False
+        return True
+
+class ProbabilisticEngine:
+    def __init__(self):
+        self.score_long = 0.0
+        self.score_short = 0.0
+
+    def add(self, bias: str, weight: float):
+        if bias == "LONG":
+            self.score_long += weight
+        elif bias == "SHORT":
+            self.score_short += weight
+
+    def result(self) -> Tuple[str, float]:
+        total = self.score_long + self.score_short
+        if total == 0:
+            return "NEUTRAL", 0.5
+        prob_long = self.score_long / total
+        prob_short = self.score_short / total
+        if prob_long > prob_short:
+            return "LONG", prob_long
+        else:
+            return "SHORT", prob_short
+
+class PositionSizer:
+    @staticmethod
+    def size(confidence: float, trap_strength: float, volume_ratio: float) -> float:
+        """Return position size multiplier (1.0 = base)"""
+        base = 1.0
+
+        # Confidence scaling
+        if confidence > 0.8:
+            base *= 1.5
+        elif confidence < 0.6:
+            base *= 0.5
+
+        # Trap strength
+        base *= (1.0 + trap_strength)
+
+        # Low volume risk
+        if volume_ratio < 0.5:
+            base *= 0.7
+
+        return min(base, 2.0)
+
+class TimeDecayFilter:
+    @staticmethod
+    def apply(new_bias: str) -> str:
+        global LAST_SIGNAL, LAST_SIGNAL_TIME
+        now = time.time()
+
+        if LAST_SIGNAL is None:
+            LAST_SIGNAL = new_bias
+            LAST_SIGNAL_TIME = now
+            return new_bias
+
+        if new_bias == LAST_SIGNAL:
+            LAST_SIGNAL_TIME = now
+            return new_bias
+
+        if (now - LAST_SIGNAL_TIME) < SIGNAL_PERSISTENCE_SEC:
+            return LAST_SIGNAL
+
+        LAST_SIGNAL = new_bias
+        LAST_SIGNAL_TIME = now
+        return new_bias
+
+# ================= NEW DETECTOR FROM MENTOR (Overbought/Oversold Traps) =================
+class OverboughtDistributionTrap:
+    @staticmethod
+    def detect(rsi6: float, short_dist: float, volume_ratio: float,
+               down_energy: float, up_energy: float, ofi_bias: str,
+               ofi_strength: float, change_5m: float) -> Dict:
+        """
+        Mendeteksi perangkap distribusi ketika market overbought namun ada sinyal LONG palsu.
+        Priority lebih tinggi dari Empty Book Trap (-261 vs -260).
+        """
+        # Kasus 1: Overbought + short liq dekat + volume rendah + tidak ada bid support
+        if (rsi6 > 70 and
+            short_dist < 2.0 and
+            volume_ratio < 0.8 and
+            down_energy < 0.1 and
+            up_energy < 1.0):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Overbought short squeeze trap: RSI {rsi6:.1f} overbought, short liq close, low volume, no bids → akan dump",
+                "priority": -261
+            }
+        # Kasus 2: Overbought + OFI LONG strength tinggi + volume rendah → distribusi
+        if (rsi6 > 70 and
+            ofi_bias == "LONG" and
+            ofi_strength > 0.6 and
+            volume_ratio < 0.8):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Overbought distribution: RSI {rsi6:.1f} + OFI LONG {ofi_strength:.2f} with low volume → smart money distributing",
+                "priority": -261
+            }
+        # Kasus 3: Overbought + harga sudah naik >2% dalam 5m dengan volume rendah → exhaustion
+        if (rsi6 > 70 and
+            change_5m > 2.0 and
+            volume_ratio < 0.7):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Overbought exhaustion: price up {change_5m:.1f}% with low volume → pullback likely",
+                "priority": -261
+            }
+        return {"override": False}
+
+class OversoldSqueezeTrap:
+    @staticmethod
+    def detect(rsi6: float, long_dist: float, volume_ratio: float,
+               up_energy: float, down_energy: float, ofi_bias: str,
+               ofi_strength: float, change_5m: float) -> Dict:
+        if (rsi6 < 30 and
+            long_dist < 2.0 and
+            volume_ratio < 0.8 and
+            up_energy < 0.1 and
+            down_energy < 1.0):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Oversold squeeze trap: RSI {rsi6:.1f} oversold, long liq close ({long_dist}%), low volume, no asks → akan pump",
+                "priority": -261
+            }
+        return {"override": False}
+
+class EmptyBookTrapDetector:
+    @staticmethod
+    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float) -> Dict:
+        # Jika down energy 0 (no bids) tapi short liq dekat, itu trap untuk SHORTER
+        if down_energy < 0.1 and short_dist < 2.0:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Empty Book Trap: No bid support ({down_energy:.2f}) + Short Liq dekat ({short_dist:.2f}%) → Rawan Short Squeeze",
+                "priority": -260  # Priority sangat tinggi
+            }
+        # Jika up energy 0 (no asks) tapi long liq dekat, itu trap untuk LONGER
+        if up_energy < 0.1 and long_dist < 2.0:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Empty Book Trap: No ask resistance ({up_energy:.2f}) + Long Liq dekat ({long_dist:.2f}%) → Rawan Long Squeeze",
+                "priority": -260
+            }
+        return {"override": False}
+
+# ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
+class SqueezeContinuationDetector:
+    @staticmethod
+    def detect(rsi6_5m: float, change_5m: float, volume_ratio: float,
+               short_dist: float, up_energy: float, down_energy: float,
+               ofi_bias: str, ofi_strength: float, bid_slope: float, ask_slope: float) -> Dict:
+        """
+        Mendeteksi squeeze continuation yang membatalkan sinyal SHORT palsu.
+        Priority lebih tinggi dari Fake Energy Trap (-230) yaitu -265.
+        """
+        # Kasus 1: RSI 5m overbought, harga naik, volume rendah, tapi OFI SHORT (tekanan jual) -> squeeze
+        if (rsi6_5m > 70 and
+            change_5m > 2.0 and
+            volume_ratio < 0.8 and
+            ofi_bias == "SHORT" and
+            ofi_strength > 0.5):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Squeeze continuation: RSI 5m {rsi6_5m:.1f} overbought, price up {change_5m:.1f}% low vol, but OFI SHORT {ofi_strength:.2f} → selling being absorbed, squeeze ongoing",
+                "priority": -265
+            }
+        # Kasus 2: Ask slope >> bid slope (sell wall besar) namun harga naik -> wall being eaten
+        if (ask_slope > bid_slope * 3 and
+            change_5m > 3.0 and
+            volume_ratio < 0.8):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Squeeze continuation: large ask wall ({ask_slope:.0f}) but price rising {change_5m:.1f}% → wall absorbed, upside continuation",
+                "priority": -265
+            }
+        # Kasus 3: Short liq masih dekat (<5%) dan up_energy positif -> squeeze berpotensi lanjut
+        if (short_dist < 5.0 and
+            up_energy > 0.1 and
+            change_5m > 2.0 and
+            volume_ratio < 0.8):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Squeeze continuation: short liq {short_dist}% still close, price up {change_5m:.1f}% low vol → short squeeze ongoing",
+                "priority": -265
+            }
+        return {"override": False}
+
+# ================= EXISTING DETECTOR MODULES (unchanged) =================
+class RetailSentimentTracker:
+    @staticmethod
+    def detect(change_5m: float, volume_ratio: float, retail_order_flow: float) -> Dict:
+        if change_5m < -2.0 and volume_ratio > 2.0 and retail_order_flow > 1.5:
+            return {
+                "signal": "LONG",
+                "confidence": "SUPREME",
+                "reason": "恐慌割肉盘出现，量化机构在低位接盘",
+                "action": "BUY_PANIC",
+                "priority": -100
+            }
+        if change_5m > 2.0 and volume_ratio > 2.0 and retail_order_flow < 0.5:
+            return {
+                "signal": "SHORT",
+                "confidence": "SUPREME",
+                "reason": "贪婪追高盘出现，量化机构在高位派发",
+                "action": "SELL_FOMO",
+                "priority": -100
+            }
+        return {"signal": "NEUTRAL", "priority": 0}
+
+class RSIVolumeParadoxDetector:
+    @staticmethod
+    def detect(rsi: float, volume_ratio: float, price_change: float,
+               obv_trend: str, stoch_k: float, stoch_d: float) -> Dict:
+        if rsi < 30 and volume_ratio > 1.5:
+            return {
+                "is_trap": True,
+                "correct_bias": "SHORT",
+                "reason": f"Oversold trap: RSI {rsi:.1f} + Volume tinggi {volume_ratio:.2f}x → masih panic selling",
+                "priority": -120
+            }
+        if rsi > 70 and volume_ratio > 1.5:
+            return {
+                "is_trap": True,
+                "correct_bias": "LONG",
+                "reason": f"Overbought trap: RSI {rsi:.1f} + Volume tinggi {volume_ratio:.2f}x → momentum masih kuat",
+                "priority": -120
+            }
+        if obv_trend == "NEGATIVE_EXTREME" and 40 < rsi < 60 and stoch_k > stoch_d:
+            return {
+                "is_trap": True,
+                "correct_bias": "LONG",
+                "reason": f"OBV bait: OBV negatif ekstrim tapi Stoch bullish → akan pump",
+                "priority": -120
+            }
+        if 30 < rsi < 45 and volume_ratio < 0.8 and stoch_k < stoch_d:
+            return {
+                "is_trap": True,
+                "correct_bias": "SHORT",
+                "reason": f"Bounce trap: RSI {rsi:.1f} + Volume rendah {volume_ratio:.2f}x + Stoch bearish → dead cat bounce",
+                "priority": -120
+            }
+        if 65 < rsi < 75 and volume_ratio < 0.8 and price_change > 0:
+            return {
+                "is_trap": True,
+                "correct_bias": "LONG",
+                "reason": f"Volume exhaustion: RSI {rsi:.1f} + Volume turun {volume_ratio:.2f}x tapi harga naik → seller habis",
+                "priority": -120
+            }
+        return {"is_trap": False, "correct_bias": "NEUTRAL", "priority": 0}
+
+class EnergySupremacyOverride:
+    @staticmethod
+    def detect(up_energy: float, down_energy: float) -> Dict:
+        if up_energy <= 0 or down_energy <= 0:
+            return {"override": False}
+        ratio = down_energy / up_energy
+        if ratio > ENERGY_RATIO_THRESHOLD:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Energy supremacy: down_energy {down_energy:.2f}x up_energy → force LONG",
+                "priority": -250
+            }
+        elif up_energy / down_energy > ENERGY_RATIO_THRESHOLD:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Energy supremacy: up_energy {up_energy:.2f}x down_energy → force SHORT",
+                "priority": -250
+            }
+        return {"override": False, "priority": 0}
+
+class VacuumDirectionRule:
+    @staticmethod
+    def detect(bid_volume: float, ask_volume: float, up_energy: float, down_energy: float) -> Dict:
+        if bid_volume < VACUUM_VOLUME_THRESHOLD and ask_volume < VACUUM_VOLUME_THRESHOLD:
+            if up_energy < down_energy:
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": "Vacuum: kedua sisi kosong, energy up lebih murah → LONG",
+                    "priority": -245
+                }
+            else:
+                return {
+                    "override": True,
+                    "bias": "SHORT",
+                    "reason": "Vacuum: kedua sisi kosong, energy down lebih murah → SHORT",
+                    "priority": -245
+                }
+        if bid_volume < VACUUM_VOLUME_THRESHOLD and ask_volume > 0 and up_energy < down_energy * 3:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": "Vacuum: bid kosong, energi up murah → LONG",
+                "priority": -245
+            }
+        if ask_volume < VACUUM_VOLUME_THRESHOLD and bid_volume > 0 and down_energy < up_energy * 3:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": "Vacuum: ask kosong, energi down murah → SHORT",
+                "priority": -245
+            }
+        return {"override": False, "priority": 0}
+
+class DeadMarketProximityRule:
+    @staticmethod
+    def detect(agg: float, flow: float, short_dist: float, long_dist: float,
+               up_energy: float, down_energy: float) -> Dict:
+        if agg < DEAD_AGG_THRESHOLD and flow < DEAD_FLOW_THRESHOLD:
+            if short_dist < LIQ_PROXIMITY_THRESHOLD:
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": f"Dead market + short liq sangat dekat (+{short_dist}%) → LONG",
+                    "priority": -235
+                }
+            if long_dist < LIQ_PROXIMITY_THRESHOLD:
+                return {
+                    "override": True,
+                    "bias": "SHORT",
+                    "reason": f"Dead market + long liq sangat dekat (-{long_dist}%) → SHORT",
+                    "priority": -235
+                }
+            if short_dist < long_dist and up_energy < down_energy * 3:
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": f"Dead market: short liq lebih dekat, energi up murah → LONG",
+                    "priority": -235
+                }
+            if long_dist < short_dist and down_energy < up_energy * 3:
+                return {
+                    "override": True,
+                    "bias": "SHORT",
+                    "reason": f"Dead market: long liq lebih dekat, energi down murah → SHORT",
+                    "priority": -235
+                }
+        return {"override": False, "priority": 0}
+
+class OverboughtDistributionTrapFilter:
+    @staticmethod
+    def detect(rsi: float, oi_delta: float, up_energy: float, down_energy: float) -> Dict:
+        if rsi > OVERBOUGHT_RSI and oi_delta > OI_DELTA_THRESHOLD and up_energy < down_energy * 5:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Overbought trap: RSI {rsi:.1f} + OI naik {oi_delta:.2f}% tapi energi up murah → pump lanjut",
+                "priority": -190
+            }
+        return {"override": False, "priority": 0}
+
+class LiquidityFlushConfirmation:
+    @staticmethod
+    def detect(short_dist: float, long_dist: float, agg: float) -> Dict:
+        if short_dist < FLUSH_ZONE_THRESHOLD and long_dist < FLUSH_ZONE_THRESHOLD:
+            return {
+                "wait": True,
+                "reason": f"Double sweep zone: short liq +{short_dist}%, long liq -{long_dist}% → tunggu sweep",
+                "priority": -255
+            }
+        if agg < FLUSH_AGG_THRESHOLD and (short_dist < FLUSH_ZONE_THRESHOLD or long_dist < FLUSH_ZONE_THRESHOLD):
+            return {
+                "wait": True,
+                "reason": f"Low aggression + close liquidity → kemungkinan flush, tunggu",
+                "priority": -255
+            }
+        return {"wait": False, "priority": 0}
+
+class EnergyGapTrapDetector:
+    @staticmethod
+    def detect(rsi14: float, up_energy: float, down_energy: float) -> Dict:
+        if rsi14 > 75 and down_energy < up_energy * 0.1:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Energy Gap Trap: RSI {rsi14:.1f} overbought + down_energy {down_energy:.2f} << up_energy {up_energy:.2f} → HFT akan dump",
+                "priority": -215
+            }
+        if rsi14 < 25 and up_energy < down_energy * 0.1:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Energy Gap Trap: RSI {rsi14:.1f} oversold + up_energy {up_energy:.2f} << down_energy {down_energy:.2f} → HFT akan pump",
+                "priority": -215
+            }
+        return {"override": False, "priority": 0}
+
+class ExtremeOversoldReversalFilter:
+    @staticmethod
+    def detect(rsi6: float, rsi14: float, stoch_k: float, obv_value: float, obv_trend: str,
+               long_dist: float, down_energy: float, ofi_bias: str,
+               ofi_strength: float, change_5m: float) -> Dict:
+        obv_extreme_negative = obv_value < -30_000_000
+        
+        if (rsi6 < EXTREME_OVERSOLD_RSI and
+            rsi14 < EXTREME_OVERSOLD_RSI and
+            stoch_k < EXTREME_OVERSOLD_STOCH and
+            obv_trend == "NEGATIVE_EXTREME" and
+            obv_extreme_negative and
+            change_5m < PANIC_DROP_THRESHOLD and
+            down_energy < 0.01):
+            if ofi_bias == "LONG" and ofi_strength > 0.3:
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": f"Extreme oversold reversal: OBV {obv_value:,.0f} (strong selling exhaustion) + panic drop → bounce imminent",
+                    "priority": -225
+                }
+        return {"override": False, "priority": 0}
+
+class PanicDropExhaustionDetector:
+    @staticmethod
+    def detect(change_5m: float, volume_ratio: float, rsi6: float,
+               down_energy: float, obv_trend: str) -> Dict:
+        if (change_5m < -10.0 and
+            volume_ratio < 1.0 and
+            rsi6 < 15 and
+            down_energy < 0.01 and
+            obv_trend == "NEGATIVE_EXTREME"):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Panic exhaustion: drop {change_5m:.1f}% + volume drying + RSI {rsi6:.1f} + no sellers → reversal likely",
+                "priority": -224
+            }
+        return {"override": False, "priority": 0}
+
+class ShortSqueezeTrapDetector:
+    @staticmethod
+    def detect(long_dist: float, rsi6: float, ofi_bias: str,
+               ofi_strength: float, down_energy: float,
+               agg: float, flow: float) -> Dict:
+        if (long_dist < 1.0 and
+            rsi6 < 20 and
+            ofi_bias == "LONG" and
+            ofi_strength > 0.3 and
+            down_energy < 0.05 and
+            agg < 0.5):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Short squeeze trap: long liq {long_dist}% + oversold RSI {rsi6:.1f} + OFI LONG + no sellers → HFT will pump to trigger liq then bounce",
+                "priority": -223
+            }
+        return {"override": False, "priority": 0}
+
+class OFIExtremeOversoldConfirm:
+    @staticmethod
+    def detect(rsi6: float, ofi_bias: str, ofi_strength: float,
+               long_dist: float, down_energy: float, up_energy: float,
+               volume_ratio: float) -> Dict:
+        min_ofi_strength = 0.60 if volume_ratio < 0.8 else 0.35
+        
+        if (rsi6 < 20 and
+            ofi_bias == "LONG" and
+            ofi_strength > min_ofi_strength and
+            down_energy < 0.1):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"OFI confirms oversold bounce: RSI {rsi6:.1f} + OFI LONG ({ofi_strength:.2f} > {min_ofi_strength:.2f}) + no sellers → smart money accumulating",
+                "priority": -222
+            }
+        if (rsi6 > 80 and
+            ofi_bias == "SHORT" and
+            ofi_strength > min_ofi_strength and
+            up_energy < 0.1):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"OFI confirms overbought dump: RSI {rsi6:.1f} + OFI SHORT ({ofi_strength:.2f} > {min_ofi_strength:.2f}) + no buyers → smart money distributing",
+                "priority": -222
+            }
+        return {"override": False, "priority": 0}
+
+class OversoldContinuation:
+    @staticmethod
+    def detect(rsi6: float, obv_trend: str, price: float, ma25: float, ma99: float,
+               volume_ratio: float, down_energy: float) -> Dict:
+        if rsi6 < 25 and obv_trend == "NEGATIVE_EXTREME" and price < ma25 and price < ma99 and volume_ratio < 0.8:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Oversold continuation: RSI {rsi6:.1f} deep oversold, price below MAs, low volume → falling knife likely",
+                "priority": -223
+            }
+        return {"override": False, "priority": 0}
+
+class OversoldBounce:
+    @staticmethod
+    def detect(rsi6: float, obv_trend: str, down_energy: float, long_dist: float,
+               price: float, recent_low: float, up_energy: float, ma25: float, ma99: float) -> Dict:
+        if rsi6 < 25 and obv_trend == "NEGATIVE_EXTREME" and down_energy < 0.01:
+            if price < ma25 and price < ma99:
+                return {"override": False}
+            if long_dist < 3.0 or (price - recent_low) / recent_low < 0.02 or up_energy > 0.1:
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": f"Oversold bounce: RSI {rsi6:.1f} deep oversold, OBV extreme negative, no sellers → potential bounce",
+                    "priority": -223
+                }
+        return {"override": False, "priority": 0}
+
+class StrongBearishOverride:
+    @staticmethod
+    def detect(rsi6: float, obv_trend: str, price: float, ma25: float, ma99: float,
+               volume_ratio: float, down_energy: float) -> Dict:
+        if (price < ma25 and price < ma99 and
+            obv_trend == "NEGATIVE_EXTREME" and
+            volume_ratio < 0.8 and
+            rsi6 < 40 and
+            down_energy < ENERGY_ZERO_THRESHOLD):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Strong bearish override: price below MAs, OBV extreme, low volume, RSI {rsi6:.1f} < 40 → force SHORT",
+                "priority": -222
+            }
+        return {"override": False, "priority": 0}
+
+class OFIConflictFilter:
+    @staticmethod
+    def detect(ofi_bias: str, ofi_strength: float, short_dist: float, long_dist: float,
+               up_energy: float, down_energy: float, rsi6: float, change_5m: float) -> Dict:
+        if ofi_bias != "NEUTRAL" and ofi_strength > 0.7:
+            if not (abs(change_5m) > 8.0 or rsi6 < 10 or rsi6 > 90):
+                return {"override": False, "priority": 0}
+        if ofi_bias == "NEUTRAL" or ofi_strength < 0.7:
+            return {"override": False}
+        if ofi_bias == "LONG" and down_energy < up_energy * 0.2 and long_dist < 1.5:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"OFI conflict: OFI says LONG (strength {ofi_strength:.2f}) but down_energy is cheap and long liq close ({long_dist}%) → override to SHORT",
+                "priority": -222
+            }
+        if ofi_bias == "SHORT" and up_energy < down_energy * 0.2 and short_dist < 1.5:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"OFI conflict: OFI says SHORT (strength {ofi_strength:.2f}) but up_energy is cheap and short liq close ({short_dist}%) → override to LONG",
+                "priority": -222
+            }
+        if ofi_bias == "LONG" and rsi6 < 30 and long_dist < 2.0 and down_energy < 0.1:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"OFI conflict: OFI says LONG in oversold (RSI {rsi6:.1f}) but long liq close and no sellers → likely trap, override to SHORT",
+                "priority": -222
+            }
+        return {"override": False, "priority": 0}
+
+class LiquidityPriorityEnergyCheck:
+    @staticmethod
+    def detect(short_dist: float, long_dist: float,
+               up_energy: float, down_energy: float,
+               price_change_5m: float) -> Dict:
+        CLOSE_LIQ = 1.5
+        if (long_dist < CLOSE_LIQ and
+            long_dist < short_dist and
+            down_energy < 0.01 and
+            price_change_5m < -5.0):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Liquidity priority blocked: long liq dekat ({long_dist}%) tapi down_energy {down_energy:.2f} + harga sudah drop {price_change_5m:.1f}% → tidak ada fuel untuk dump, justru bounce",
+                "priority": -221
+            }
+        if (short_dist < CLOSE_LIQ and
+            short_dist < long_dist and
+            up_energy < 0.01 and
+            price_change_5m > 5.0):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Liquidity priority blocked: short liq dekat ({short_dist}%) tapi up_energy {up_energy:.2f} + harga sudah pump {price_change_5m:.1f}% → tidak ada fuel untuk pump, justru dump",
+                "priority": -221
+            }
+        return {"override": False, "priority": 0}
+
+class LiquidityPriorityOverride:
+    @staticmethod
+    def detect(short_dist: float, long_dist: float, volume_ratio: float) -> Dict:
+        if volume_ratio < 0.5:
+            return {
+                "override": False,
+                "priority": 0,
+                "reason": "Volume too low (<0.5x) → Liquidity target unreliable (HFT Trap Risk)"
+            }
+        
+        CLOSE_LIQ_THRESHOLD = 1.5
+        if short_dist < CLOSE_LIQ_THRESHOLD and short_dist < long_dist:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Liquidity priority: short liq sangat dekat (+{short_dist}%) → ambil likuidasi short (LONG)",
+                "priority": -220
+            }
+        if long_dist < CLOSE_LIQ_THRESHOLD and long_dist < short_dist:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Liquidity priority: long liq sangat dekat (-{long_dist}%) → ambil likuidasi long (SHORT)",
+                "priority": -220
+            }
+        return {"override": False, "priority": 0}
+
+class LiquidityEnergyCheck:
+    @staticmethod
+    def detect(short_dist: float, long_dist: float, up_energy: float, down_energy: float,
+               volume_ratio: float, ofi_bias: str, ofi_strength: float, rsi6_5m: float,
+               obv_magnitude: str) -> Dict:
+        CLOSE_LIQ = 1.5
+        
+        if volume_ratio < 0.6:
+            return {"override": False, "priority": 0}
+        
+        if ofi_bias == "NEUTRAL" or ofi_strength < 0.4:
+            return {"override": False, "priority": 0}
+        
+        if short_dist < CLOSE_LIQ and short_dist < long_dist and down_energy < up_energy * 0.2:
+            if rsi6_5m > 70:
+                return {"override": False, "priority": 0}
+        
+        if obv_magnitude == "LOW" and volume_ratio < 0.8:
+            return {"override": False, "priority": 0}
+        
+        if short_dist < CLOSE_LIQ and short_dist < long_dist and down_energy < up_energy * 0.2:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Liquidity energy trap: short liq dekat (+{short_dist}%) tapi down_energy {down_energy:.2f} jauh lebih murah dari up_energy {up_energy:.2f} → HFT akan dump dulu",
+                "priority": -220
+            }
+        if long_dist < CLOSE_LIQ and long_dist < short_dist and up_energy < down_energy * 0.2:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Liquidity energy trap: long liq dekat (-{long_dist}%) tapi up_energy {up_energy:.2f} jauh lebih murah dari down_energy {down_energy:.2f} → HFT akan pump dulu",
+                "priority": -220
+            }
+        return {"override": False, "priority": 0}
+
+class OverboughtLiquidityTrap:
+    @staticmethod
+    def detect(short_dist: float, long_dist: float, rsi6: float, up_energy: float, down_energy: float,
+               ofi_bias: str, ofi_strength: float, volume_ratio: float) -> Dict:
+        CLOSE_LIQ = 1.5
+
+        if volume_ratio < 0.6:
+            return {"override": False, "priority": 0}
+
+        if (short_dist < CLOSE_LIQ and short_dist < long_dist and
+            rsi6 > 70 and down_energy < ENERGY_ZERO_THRESHOLD):
+            if ofi_bias == "SHORT" and ofi_strength > 0.6:
+                return {"override": False, "priority": 0}
+
+        if short_dist < CLOSE_LIQ and short_dist < long_dist and rsi6 > 70 and down_energy < ENERGY_ZERO_THRESHOLD:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Overbought liquidity trap: short liq sangat dekat (+{short_dist}%) tetapi RSI overbought ({rsi6:.1f}) dan tidak ada tekanan jual (down_energy {down_energy:.2f}) → HFT akan pump dulu untuk ambil short liq",
+                "priority": -221
+            }
+        return {"override": False, "priority": 0}
+
+class LiquidityBaitDetector:
+    @staticmethod
+    def detect(short_dist: float, long_dist: float, up_energy: float, down_energy: float,
+               agg: float, flow: float, volume_ratio: float) -> Dict:
+        CLOSE_LIQ = 2.0
+        if long_dist < 1.0 and volume_ratio < 0.7:
+            return {
+                "override": True,
+                "bias": "LONG" if up_energy < down_energy else "SHORT",
+                "reason": f"Liquidity bait: long liq dekat (-{long_dist}%) + volume rendah {volume_ratio:.2f}x → HFT akan reverse",
+                "priority": -216
+            }
+        if short_dist < 1.0 and volume_ratio < 0.7:
+            return {
+                "override": True,
+                "bias": "SHORT" if down_energy < up_energy else "LONG",
+                "reason": f"Liquidity bait: short liq dekat (+{short_dist}%) + volume rendah {volume_ratio:.2f}x → HFT akan reverse",
+                "priority": -216
+            }
+        if short_dist < CLOSE_LIQ and long_dist < CLOSE_LIQ:
+            return {"override": False, "priority": 0}
+        if short_dist < CLOSE_LIQ and down_energy < up_energy * 0.3 and agg < 0.3:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Liquidity bait: short liq dekat (+{short_dist}%) tetapi down_energy {down_energy:.2f} lebih murah → HFT akan dump dulu",
+                "priority": -216
+            }
+        if long_dist < CLOSE_LIQ and up_energy < down_energy * 0.3 and agg < 0.3:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Liquidity bait: long liq dekat (-{long_dist}%) tetapi up_energy {up_energy:.2f} lebih murah → HFT akan pump dulu",
+                "priority": -216
+            }
+        return {"override": False, "priority": 0}
+
+class ExtremeEnergyImbalance:
+    @staticmethod
+    def detect(up_energy: float, down_energy: float, volume_ratio: float, rsi14: float,
+               price_change_5m: float, ofi_bias: str, ofi_strength: float,
+               rsi6: float, rsi6_5m: float) -> Dict:
+        if volume_ratio < 0.7:
+            return {"override": False, "priority": 0}
+        
+        if ofi_bias == "NEUTRAL" or ofi_strength < 0.4:
+            return {"override": False, "priority": 0}
+        
+        if down_energy < ENERGY_ZERO_THRESHOLD and price_change_5m < -1.0:
+            return {"override": False, "priority": 0}
+        
+        if up_energy < down_energy and rsi6_5m > 30:
+            return {"override": False, "priority": 0}
+        
+        if down_energy < ENERGY_ZERO_THRESHOLD and up_energy > MIN_ENERGY_TO_MOVE:
+            if price_change_5m > 1.5 and ofi_bias == "LONG" and ofi_strength > 0.3:
+                return {"override": False, "priority": 0}
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Extreme energy imbalance: down_energy {down_energy:.2f} << up_energy {up_energy:.2f} → tidak ada buyer support, bearish",
+                "priority": -218
+            }
+        if up_energy < ENERGY_ZERO_THRESHOLD and down_energy > MIN_ENERGY_TO_MOVE:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Extreme energy imbalance: up_energy {up_energy:.2f} << down_energy {down_energy:.2f} → tidak ada seller pressure, bullish",
+                "priority": -218
+            }
+        return {"override": False, "priority": 0}
+
+class EnergyTrapFilter:
+    @staticmethod
+    def detect(up_energy: float, down_energy: float, price_change_5m: float,
+               volume_ratio: float, rsi14: float) -> Dict:
+        if down_energy < ENERGY_ZERO_THRESHOLD and up_energy < 1.0 and price_change_5m > 2.0 and volume_ratio < 1.0 and rsi14 > 60:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Energy Trap: down_energy {down_energy:.2f} seolah habis, tapi harga naik {price_change_5m:.1f}% dengan volume turun {volume_ratio:.2f}x → HFT akan dump",
+                "priority": -217
+            }
+        return {"override": False, "priority": 0}
+
+class ThinOrderBookPump:
+    @staticmethod
+    def detect(up_energy: float, down_energy: float, price_change_5m: float,
+               volume_ratio: float, ofi_bias: str, ofi_strength: float) -> Dict:
+        if (down_energy < ENERGY_ZERO_THRESHOLD and up_energy > 0 and
+            price_change_5m > 1.0 and volume_ratio < 1.0 and
+            ofi_bias == "LONG" and ofi_strength > 0):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Thin order book pump: down_energy {down_energy:.2f} but price rising and OFI bullish → no sellers to stop the pump",
+                "priority": -217
+            }
+        return {"override": False, "priority": 0}
+
+class HFTTrapDetector:
+    @staticmethod
+    def detect_fake_energy(down_energy: float, up_energy: float, price_change_5m: float,
+                           volume_ratio: float, rsi14: float) -> Dict:
+        if down_energy < ENERGY_ZERO_THRESHOLD and price_change_5m > 3.0 and volume_ratio < 0.7 and rsi14 > 60:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Fake Energy: down_energy=0 tetapi harga naik {price_change_5m:.1f}% dengan volume turun {volume_ratio:.2f}x → HFT trap, akan dump",
+                "priority": -230
+            }
+        if up_energy < ENERGY_ZERO_THRESHOLD and price_change_5m < -3.0 and volume_ratio < 0.7 and rsi14 < 40:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Fake Energy: up_energy=0 tetapi harga turun {price_change_5m:.1f}% dengan volume turun {volume_ratio:.2f}x → HFT trap, akan pump",
+                "priority": -230
+            }
+        return {"override": False, "priority": 0}
+
+class VolumeConfidenceFilter:
+    @staticmethod
+    def apply(volume_ratio: float, current_confidence: str, current_reason: str) -> Tuple[str, str]:
+        if volume_ratio < 0.3:
+            if current_confidence == "ABSOLUTE":
+                new_conf = "MEDIUM"
+            elif current_confidence == "MEDIUM":
+                new_conf = "MEDIUM"
+            else:
+                new_conf = current_confidence
+            reason_suffix = f" | Low volume warning ({volume_ratio:.1%} of normal)"
+            return new_conf, current_reason + reason_suffix
+        return current_confidence, current_reason
+
+class MultiTimeframeConfirmation:
+    @staticmethod
+    def check(rsi6_1m: float, rsi6_5m: float, current_confidence: str, current_reason: str) -> Tuple[str, str]:
+        if (rsi6_1m > 50 and rsi6_5m < 40) or (rsi6_1m < 50 and rsi6_5m > 60):
+            if current_confidence == "ABSOLUTE":
+                new_conf = "MEDIUM"
+            else:
+                new_conf = current_confidence
+            reason_suffix = f" | Multi-TF divergence: 1m RSI {rsi6_1m:.1f} vs 5m RSI {rsi6_5m:.1f}"
+            return new_conf, current_reason + reason_suffix
+        return current_confidence, current_reason
+
+class OBVStochasticReversal:
+    @staticmethod
+    def apply(obv_trend: str, obv_value: float, stoch_k: float, stoch_d: float, 
+              current_bias: str, current_reason: str, volume_ratio: float,
+              rsi6: float, rsi6_5m: float) -> Tuple[str, str]:
+        stoch_j = 3 * stoch_k - 2 * stoch_d
+        
+        obv_magnitude_strong = abs(obv_value) > 10_000_000
+        
+        if volume_ratio < 0.8:
+            return current_bias, f"{current_reason} | Volume low ({volume_ratio:.2f}x), OBV reversal skipped"
+        
+        if obv_trend in ["NEGATIVE", "NEGATIVE_EXTREME"] and obv_magnitude_strong:
+            if stoch_j < stoch_k:
+                if rsi6 > 30 or stoch_k > 30:
+                    return current_bias, f"{current_reason} | OBV reversal to LONG skipped (1m not oversold)"
+                if rsi6_5m > 30:
+                    return current_bias, f"{current_reason} | OBV reversal to LONG skipped (5m not oversold)"
+                new_bias = "LONG" if current_bias == "SHORT" else "SHORT"
+                return new_bias, f"{current_reason} | OBV- (val={obv_value:,.0f}) & J<K → reversal to {new_bias}"
+        
+        if obv_trend in ["POSITIVE", "POSITIVE_EXTREME"] and obv_magnitude_strong:
+            if stoch_k < stoch_j:
+                if rsi6 < 70 or stoch_k < 70:
+                    return current_bias, f"{current_reason} | OBV reversal to SHORT skipped (1m not overbought)"
+                if rsi6_5m < 70:
+                    return current_bias, f"{current_reason} | OBV reversal to SHORT skipped (5m not overbought)"
+                new_bias = "LONG" if current_bias == "SHORT" else "SHORT"
+                return new_bias, f"{current_reason} | OBV+ (val={obv_value:,.0f}) & K<J → reversal to {new_bias}"
+        
+        return current_bias, f"{current_reason} | OBV magnitude {abs(obv_value):,.0f} (not strong enough for reversal)"
+
+class VolumeTrapDetector:
+    @staticmethod
+    def detect(volume_ratio: float, change_5m: float, bias: str) -> Dict:
+        if volume_ratio < 0.4 and abs(change_5m) > 2.0:
+            return {
+                "warning": True,
+                "reason": f"Low Volume Trap: Volume {volume_ratio:.2f}x but price moved {change_5m:.1f}%. Possible HFT spoof.",
+                "action": "DOWNGRADE_CONFIDENCE"
+            }
+        return {"warning": False}
+
+class OrderFlowImbalance:
+    @staticmethod
+    def calculate(trades: List[Dict], window_ms: int = 1000) -> Dict:
+        if not trades:
+            return {"bias": "NEUTRAL", "strength": 0}
+        now = time.time() * 1000
+        window_start = now - window_ms
+        buy_vol = 0.0
+        sell_vol = 0.0
+        for t in trades:
+            ts = t.get('E') or t.get('T') or t.get('time', 0)
+            if ts < window_start:
+                continue
+            qty = t.get('q') or t.get('qty')
+            if qty is None:
+                continue
+            qty = float(qty)
+            is_sell = t.get('m', False) or t.get('isBuyerMaker', False)
+            if not is_sell:
+                buy_vol += qty
+            else:
+                sell_vol += qty
+        total = buy_vol + sell_vol
+        if total == 0:
+            return {"bias": "NEUTRAL", "strength": 0}
+        ofi = (buy_vol - sell_vol) / total
+        if ofi > 0.3:
+            return {"bias": "LONG", "strength": ofi}
+        elif ofi < -0.3:
+            return {"bias": "SHORT", "strength": abs(ofi)}
+        return {"bias": "NEUTRAL", "strength": 0}
+
+class IcebergDetector:
+    @staticmethod
+    def detect(trades: List[Dict], price_level: float, tolerance: float = 0.001) -> Dict:
+        same_price_trades = []
+        for t in trades:
+            price = t.get('p') or t.get('price')
+            if price is None:
+                continue
+            price = float(price)
+            if abs(price - price_level) < tolerance:
+                qty = t.get('q') or t.get('qty')
+                if qty is not None:
+                    same_price_trades.append(t)
+        if len(same_price_trades) > 20:
+            total_qty = sum(float(t.get('q', t.get('qty', 0))) for t in same_price_trades)
+            if total_qty > 100000:
+                first = same_price_trades[0]
+                is_sell = first.get('m', False) or first.get('isBuyerMaker', False)
+                side = "SELL" if is_sell else "BUY"
+                return {"detected": True, "side": side, "total_qty": total_qty}
+        return {"detected": False}
+
+class CrossExchangeLeader:
+    @staticmethod
+    def check_leader(symbol: str) -> Dict:
+        return {"leader": "NEUTRAL", "confidence": 0}
+
+class FundingRateTrap:
+    @staticmethod
+    def detect(funding_rate: float, open_interest: float) -> Dict:
+        if funding_rate > 0.01 and open_interest > 1000000:
+            return {"bias": "SHORT", "reason": "Long squeeze imminent"}
+        elif funding_rate < -0.01 and open_interest > 1000000:
+            return {"bias": "LONG", "reason": "Short squeeze imminent"}
+        return {"bias": "NEUTRAL"}
+
+class LiquidationHeatMap:
+    @staticmethod
+    def fetch_real_liq(symbol: str) -> Dict:
+        return {"bias": "NEUTRAL"}
+
+class QuantCrowdednessDetector:
+    @staticmethod
+    def detect(volume_ratio: float, volatility: float, open_interest_growth: float) -> Dict:
+        crowded_score = 0
+        if volume_ratio > 3.0:
+            crowded_score += 2
+        if volatility > 0.05:
+            crowded_score += 1
+        if open_interest_growth > 10:
+            crowded_score += 2
+        if crowded_score >= 4:
+            return {
+                "crowded": True,
+                "action": "REDUCE_POSITION",
+                "position_multiplier": 0.3,
+                "reason": f"Quant crowdedness high ({crowded_score}/5)",
+                "priority": 0
+            }
+        return {"crowded": False, "position_multiplier": 1.0, "priority": 0}
+
+class AlgoTypeAnalyzer:
+    @staticmethod
+    def analyze(order_book: Dict, trades: List[Dict], price: float, short_dist: float, long_dist: float,
+                up_energy: float, down_energy: float) -> Dict:
+        if trades and len(trades) > 0:
+            recent_buys = 0
+            recent_sells = 0
+            for t in trades[-100:]:
+                is_sell = t.get('m', False) or t.get('isBuyerMaker', False)
+                if is_sell:
+                    recent_sells += 1
+                else:
+                    recent_buys += 1
+            buy_ratio = safe_div(recent_buys, recent_buys + recent_sells, 0.5)
+            impact_bias = "LONG" if buy_ratio > 0.55 else "SHORT" if buy_ratio < 0.45 else "NEUTRAL"
+        else:
+            impact_bias = "NEUTRAL"
+
+        if order_book and order_book.get("asks") and order_book.get("bids"):
+            best_bid = order_book["bids"][0][0]
+            best_ask = order_book["asks"][0][0]
+            spread = (best_ask - best_bid) / price * 100 if price > 0 else 0
+            if spread < 0.02:
+                bid_depth = sum(q for _, q in order_book["bids"][:10])
+                ask_depth = sum(q for _, q in order_book["asks"][:10])
+                if bid_depth > ask_depth:
+                    cost_bias = "SHORT"
+                elif ask_depth > bid_depth:
+                    cost_bias = "LONG"
+                else:
+                    cost_bias = "NEUTRAL"
+            else:
+                cost_bias = "NEUTRAL"
+        else:
+            cost_bias = "NEUTRAL"
+
+        if short_dist < long_dist and short_dist < 2.0:
+            opp_bias = "LONG"
+        elif long_dist < short_dist and long_dist < 2.0:
+            opp_bias = "SHORT"
+        else:
+            target_price_up = price * (1 + TARGET_MOVE_PCT / 100)
+            target_price_down = price * (1 - TARGET_MOVE_PCT / 100)
+            cost_to_up = 0.0
+            cost_to_down = 0.0
+            if order_book:
+                for ask_price, ask_qty in order_book.get("asks", []):
+                    if ask_price >= target_price_up:
+                        break
+                    cost_to_up += ask_qty * (ask_price - price)
+                for bid_price, bid_qty in reversed(order_book.get("bids", [])):
+                    if bid_price <= target_price_down:
+                        break
+                    cost_to_down += bid_qty * (price - bid_price)
+            opp_bias = "LONG" if cost_to_up < cost_to_down else "SHORT" if cost_to_down < cost_to_up else "NEUTRAL"
+
+        scores = {"LONG": 0, "SHORT": 0}
+        for bias in [impact_bias, cost_bias, opp_bias]:
+            if bias == "LONG":
+                scores["LONG"] += 1
+            elif bias == "SHORT":
+                scores["SHORT"] += 1
+
+        if scores["LONG"] > scores["SHORT"]:
+            final_bias = "LONG"
+            confidence = "HIGH"
+        elif scores["SHORT"] > scores["LONG"]:
+            final_bias = "SHORT"
+            confidence = "HIGH"
+        else:
+            final_bias = "LONG" if up_energy < down_energy else "SHORT"
+            confidence = "MEDIUM"
+
+        return {"bias": final_bias, "confidence": confidence, "reason": "Algo Type Analysis"}
+
+# ================= FIXED HFT6PercentDirection =================
+class HFT6PercentDirection:
+    @staticmethod
+    def determine(price: float, short_dist: float, long_dist: float,
+                  up_energy: float, down_energy: float, oi_delta: float,
+                  agg: float, flow: float) -> Dict:
+        # Prioritas Utama: Jarak Likuiditas (Magnet)
+        if short_dist < 1.0 and short_dist < long_dist:
+            primary = "LONG"
+            reason = f"Short liq sangat dekat (+{short_dist}%) → Priority Squeeze"
+            # Jangan biarkan energy murah membatalkan squeeze kecuali ada sell wall raksasa
+            if down_energy > up_energy * 5: # Hanya batal jika ada tembok jual tebal
+                primary = "SHORT"
+                reason += " (Blocked by massive sell wall)"
+        elif long_dist < 1.0 and long_dist < short_dist:
+            primary = "SHORT"
+            reason = f"Long liq sangat dekat (-{long_dist}%) → Priority Squeeze"
+            if up_energy > down_energy * 5:
+                primary = "LONG"
+                reason += " (Blocked by massive buy wall)"
+        else:
+            # Logic lama untuk kondisi normal
+            if short_dist < long_dist:
+                primary = "LONG"
+                reason = f"Short liq lebih dekat (+{short_dist}%)"
+            else:
+                primary = "SHORT"
+                reason = f"Long liq lebih dekat (-{long_dist}%)"
+            
+            # Energy override hanya jika jarak liq jauh
+            if up_energy < down_energy * 0.5 and primary == "SHORT":
+                primary = "LONG"
+                reason = "Energi up sangat murah → HFT akan pump terlebih dahulu"
+            elif down_energy < up_energy * 0.5 and primary == "LONG":
+                primary = "SHORT"
+                reason = "Energi down sangat murah → HFT akan dump terlebih dahulu"
+
+        if oi_delta > 2.0:
+            reason += ", OI naik → posisi terperangkap memperkuat arah"
+        if agg < DEAD_AGG_THRESHOLD and flow < DEAD_FLOW_THRESHOLD:
+            primary = "LONG" if short_dist < long_dist else "SHORT"
+            reason = "Dead market, target likuidasi terdekat"
+            
+        return {"bias": primary, "reason": reason, "confidence": "HIGH"}
+
+class MultiStrategyVoting:
+    def __init__(self):
+        self.strategies = {}
+        self.dynamic_weights = {}
+
+    def register_strategy(self, name: str, base_weight: float):
+        self.strategies[name] = base_weight
+
+    def update_weights(self, market_conditions: Dict):
+        agg = market_conditions.get("agg", 1.0)
+        flow = market_conditions.get("flow", 1.0)
+        is_dead = agg < DEAD_AGG_THRESHOLD and flow < DEAD_FLOW_THRESHOLD
+
+        for name in self.strategies:
+            if is_dead:
+                if "energy" in name or "vacuum" in name:
+                    self.dynamic_weights[name] = self.strategies[name] * 5
+                elif "distribution" in name:
+                    self.dynamic_weights[name] = self.strategies[name] * 0.2
+                else:
+                    self.dynamic_weights[name] = self.strategies[name]
+            else:
+                self.dynamic_weights[name] = self.strategies[name]
+
+    def vote(self, signals: Dict[str, str]) -> Dict:
+        score_long = 0.0
+        score_short = 0.0
+        total_weight = 0.0
+
+        for strategy, bias in signals.items():
+            weight = self.dynamic_weights.get(strategy, self.strategies.get(strategy, 1.0))
+            total_weight += weight
+            if bias == "LONG":
+                score_long += weight
+            elif bias == "SHORT":
+                score_short += weight
+
+        if total_weight == 0:
+            return {"bias": "NEUTRAL", "confidence": 0}
+
+        long_prob = score_long / total_weight
+        short_prob = score_short / total_weight
+
+        if long_prob > VOTE_THRESHOLD:
+            return {"bias": "LONG", "confidence": long_prob}
+        elif short_prob > VOTE_THRESHOLD:
+            return {"bias": "SHORT", "confidence": short_prob}
+        else:
+            return {"bias": "NEUTRAL", "confidence": max(long_prob, short_prob)}
+
+# ================= INDICATOR CALCULATOR =================
+class IndicatorCalculator:
+    @staticmethod
+    def calculate_rsi(closes: List[float], period: int = 14) -> float:
+        if len(closes) < period + 1:
+            return 50.0
+        gains, losses = [], []
+        for i in range(1, period + 1):
+            change = closes[-i] - closes[-i-1]
+            if change >= 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(abs(change))
+        avg_gain = sum(gains) / period
+        avg_loss = sum(losses) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    @staticmethod
+    def calculate_stoch(highs: List[float], lows: List[float], closes: List[float],
+                        period: int = 14, smooth: int = 3) -> Tuple[float, float]:
+        if len(closes) < period + smooth:
+            return 50.0, 50.0
+
+        k_values = []
+        for i in range(smooth):
+            idx = -1 - i
+            start = -period - i
+            end = None if i == 0 else -i
+            low_min = min(lows[start:end]) if start < 0 else min(lows[start:])
+            high_max = max(highs[start:end]) if start < 0 else max(highs[start:])
+            if high_max == low_min:
+                k = 50.0
+            else:
+                close = closes[idx]
+                k = (close - low_min) / (high_max - low_min) * 100
+            k_values.append(k)
+
+        k_current = k_values[0]
+        d = sum(k_values) / len(k_values)
+        return k_current, d
+
+    @staticmethod
+    def calculate_obv(closes: List[float], volumes: List[float]) -> Tuple[List[float], str, float]:
+        if len(closes) < 2:
+            return [], "NEUTRAL", 0.0
+        
+        obv = [0.0]
+        for i in range(1, len(closes)):
+            if closes[i] > closes[i-1]:
+                obv.append(obv[-1] + volumes[i])
+            elif closes[i] < closes[i-1]:
+                obv.append(obv[-1] - volumes[i])
+            else:
+                obv.append(obv[-1])
+        
+        current_obv = obv[-1] if obv else 0.0
+        
+        if len(obv) < 20:
+            return obv, "NEUTRAL", current_obv
+        
+        recent_obv = obv[-20:]
+        if all(x < y for x, y in zip(recent_obv, recent_obv[1:])):
+            trend = "POSITIVE"
+        elif all(x > y for x, y in zip(recent_obv, recent_obv[1:])):
+            trend = "NEGATIVE"
+        else:
+            trend = "NEUTRAL"
+        
+        if current_obv > 0 and current_obv > max(obv) * 1.1:
+            trend = "POSITIVE_EXTREME"
+        if current_obv < 0 and current_obv < min(obv) * 0.9:
+            trend = "NEGATIVE_EXTREME"
+        
+        return obv, trend, current_obv
+
+    @staticmethod
+    def get_liquidation_zones(highs: List[float], lows: List[float], price: float) -> Dict:
+        if not highs or not lows or price == 0:
+            return {"long_dist": 99.0, "short_dist": 99.0}
+        recent_high = max(highs[-20:]) if len(highs) >= 20 else max(highs)
+        recent_low = min(lows[-20:]) if len(lows) >= 20 else min(lows)
+        long_dist = ((price - recent_low) / recent_low) * 100 if recent_low != 0 else 0
+        short_dist = ((recent_high - price) / price) * 100 if price != 0 else 0
+        return {
+            "long_dist": round(long_dist, 2),
+            "short_dist": round(short_dist, 2),
+            "recent_low": recent_low,
+            "recent_high": recent_high
+        }
+
+    @staticmethod
+    def calculate_energy(order_book: Dict) -> Tuple[float, float]:
+        if not order_book or not order_book.get("asks") or not order_book.get("bids"):
+            return 1.0, 1.0
+        bids = order_book["bids"]
+        asks = order_book["asks"]
+        if not bids or not asks:
+            return 1.0, 1.0
+        mid_price = (bids[0][0] + asks[0][0]) / 2
+        target_up = mid_price * 1.001
+        target_down = mid_price * 0.999
+        up_energy = 0.0
+        down_energy = 0.0
+        for price, qty in asks:
+            if price >= target_up:
+                break
+            up_energy += qty * (price - mid_price)
+        for price, qty in reversed(bids):
+            if price <= target_down:
+                break
+            down_energy += qty * (mid_price - price)
+        return up_energy, down_energy
+
+    @staticmethod
+    def calculate_retail_order_flow(trades: List[Dict]) -> float:
+        if not trades:
+            return 1.0
+        sizes = []
+        for t in trades:
+            qty = t.get('q') or t.get('qty')
+            if qty is not None:
+                sizes.append(abs(float(qty)))
+        if not sizes:
+            return 1.0
+        median_size = np.median(sizes)
+        small_trades = [t for t in trades if abs(float(t.get('q', t.get('qty', 0)))) < median_size]
+        if not small_trades:
+            return 1.0
+        buys = 0
+        sells = 0
+        for t in small_trades:
+            is_sell = t.get('m', False) or t.get('isBuyerMaker', False)
+            if not is_sell:
+                buys += 1
+            else:
+                sells += 1
+        if sells == 0:
+            return 10.0
+        return buys / sells
+
+    @staticmethod
+    def calculate_ma(closes: List[float], period: int) -> float:
+        if len(closes) < period:
+            return closes[-1]
+        return sum(closes[-period:]) / period
+
+# ================= DATA FETCHER WITH CACHING =================
+class BinanceFetcher:
+    def __init__(self, symbol: str):
+        self.symbol = symbol.upper()
+        self.base_url = "https://fapi.binance.com"
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": USER_AGENT})
+        self.session.verify = False
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=3,
+            pool_block=False
+        )
+        self.session.mount('https://', adapter)
+        self.cache = {}
+        self.cache_time = {}
+        self.cache_ttl = {
+            "funding_rate": 3600,
+            "open_interest": 60,
+            "klines_1m": 30,
+            "klines_5m": 60,
+        }
+
+    def _get_cached(self, key: str) -> Optional[Any]:
+        if key in self.cache:
+            age = time.time() - self.cache_time.get(key, 0)
+            if age < self.cache_ttl.get(key.split('_')[0], 60):
+                return self.cache[key]
+        return None
+
+    def _set_cached(self, key: str, value: Any):
+        self.cache[key] = value
+        self.cache_time[key] = time.time()
+
+    def fetch(self, endpoint: str, params: Dict = None) -> Optional[Any]:
+        try:
+            url = f"{self.base_url}{endpoint}"
+            resp = self.session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
+            if resp.status_code == 200:
+                return resp.json()
+            return None
+        except Exception as e:
+            print(f"❌ Fetch error {endpoint}: {e}")
+            return None
+
+    def get_price(self) -> Optional[float]:
+        data = self.fetch("/fapi/v1/ticker/price", {"symbol": self.symbol})
+        return safe_float(data.get("price")) if data else None
+
+    def get_klines(self, interval: str = "1m", limit: int = 100) -> Optional[Dict]:
+        cache_key = f"klines_{interval}_{limit}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+        data = self.fetch("/fapi/v1/klines", {
+            "symbol": self.symbol,
+            "interval": interval,
+            "limit": limit
+        })
+        if not data:
+            return None
+        closes = [safe_float(k[4]) for k in data]
+        highs = [safe_float(k[2]) for k in data]
+        lows = [safe_float(k[3]) for k in data]
+        volumes = [safe_float(k[5]) for k in data]
+        result = {"highs": highs, "lows": lows, "closes": closes, "volumes": volumes}
+        self._set_cached(cache_key, result)
+        return result
+
+    def get_order_book(self, limit: int = 50) -> Optional[Dict]:
+        data = self.fetch("/fapi/v1/depth", {"symbol": self.symbol, "limit": limit})
+        if not data:
+            return None
+        bids = [[float(p), float(q)] for p, q in data.get("bids", [])]
+        asks = [[float(p), float(q)] for p, q in data.get("asks", [])]
+        return {"bids": bids, "asks": asks}
+
+    def get_trades(self, limit: int = 500) -> Optional[List[Dict]]:
+        data = self.fetch("/fapi/v1/trades", {"symbol": self.symbol, "limit": limit})
+        if not data:
+            return None
+        return data
+
+    def get_open_interest(self) -> Optional[float]:
+        cache_key = "open_interest"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+        data = self.fetch("/fapi/v1/openInterest", {"symbol": self.symbol})
+        oi = safe_float(data.get("openInterest")) if data else None
+        if oi is not None:
+            self._set_cached(cache_key, oi)
+        return oi
+
+    def get_oi_history(self, limit: int = 10) -> Optional[List[float]]:
+        oi = self.get_open_interest()
+        return [oi] if oi else None
+
+    def get_funding_rate(self) -> Optional[float]:
+        cache_key = "funding_rate"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+        data = self.fetch("/fapi/v1/fundingRate", {"symbol": self.symbol, "limit": 1})
+        if data and len(data) > 0:
+            rate = safe_float(data[0].get("fundingRate"))
+            self._set_cached(cache_key, rate)
+            return rate
+        return None
+
+    def calculate_wmi(self, short_dist: float, long_dist: float) -> float:
+        if short_dist < 0.1 or long_dist < 0.1:
+            return 0
+        short_mass = 1.0 / (short_dist ** 2)
+        long_mass = 1.0 / (long_dist ** 2)
+        if short_mass + long_mass == 0:
+            return 0
+        return ((short_mass - long_mass) / (short_mass + long_mass)) * 100
+
+# ================= LATENCY COMPENSATOR =================
+class LatencyCompensator:
+    def __init__(self):
+        self.latency_history = deque(maxlen=100)
+        self.base_threshold = MAX_LATENCY_MS
+
+    def measure_latency(self) -> float:
+        try:
+            start = time.time()
+            requests.get("https://fapi.binance.com/fapi/v1/time", timeout=5)
+            latency = (time.time() - start) * 1000
+            self.latency_history.append(latency)
+            return np.mean(self.latency_history)
+        except:
+            return 999.0
+
+    def get_adaptive_threshold(self) -> float:
+        if not self.latency_history:
+            return self.base_threshold
+        avg_latency = np.mean(self.latency_history)
+        return min(avg_latency * 1.5, 1000)
+
+    def adjust_signal(self, bias: str, latency_ms: float) -> str:
+        adaptive = self.get_adaptive_threshold()
+        if latency_ms > adaptive:
+            return "WAIT"
+        return bias
+
+# ================= STATE MANAGER =================
+class StateManager:
+    def __init__(self):
+        self.price_history = deque(maxlen=100)
+        self.rsi_history = deque(maxlen=30)
+        self.last_bias = "NEUTRAL"
+        self.last_entry_price = 0.0
+        self.last_entry_time = 0.0
+
+    def update(self, price: float, rsi: float):
+        self.price_history.append(price)
+        self.rsi_history.append(rsi)
+
+    def update_position(self, bias: str, price: float):
+        self.last_bias = bias
+        self.last_entry_price = price
+        self.last_entry_time = time.time()
+
+    def get_floating_pnl_pct(self, current_price: float) -> float:
+        if self.last_bias == "NEUTRAL" or self.last_entry_price == 0:
+            return 0.0
+        if self.last_bias == "LONG":
+            return ((current_price - self.last_entry_price) / self.last_entry_price) * 100
+        else:  # SHORT
+            return ((self.last_entry_price - current_price) / self.last_entry_price) * 100
+
+# ================= ANALYZER =================
+class BinanceAnalyzer:
+    def __init__(self, symbol: str):
+        self.symbol = symbol.upper()
+        self.fetcher = BinanceFetcher(symbol)
+        self.state_mgr = StateManager()
+        self.voter = MultiStrategyVoting()
+        self.voter.register_strategy("energy", 2.0)
+        self.voter.register_strategy("vacuum", 1.5)
+        self.voter.register_strategy("liquidity_proximity", 1.0)
+        self.voter.register_strategy("distribution", 1.0)
+        self.voter.register_strategy("momentum", 1.0)
+        self.voter.register_strategy("algo_type", 1.2)
+        self.voter.register_strategy("hft_6pct", 1.5)
+
+        if IS_KOYEB:
+            self.ws = None
+            print("⚠️ Koyeb Nano: WebSocket disabled to save resources")
+        else:
+            self.ws = BinanceWebSocket(symbol.lower())
+            self.ws.start()
+
+        self.latency_comp = LatencyCompensator()
+        self.last_latency = 0.0
+        self.prev_ofi_bias = "NEUTRAL"
+        self.prev_ofi_timestamp = 0.0
+        self.ofi_consistency_required = 2.0
+
+    def __del__(self):
+        if hasattr(self, 'ws') and self.ws is not None:
+            self.ws.stop()
+
+    def _is_strong_signal(self, ofi, up_energy, down_energy, change_5m, rsi6) -> bool:
+        if ofi is not None and ofi.get("bias") != "NEUTRAL" and ofi.get("strength", 0) > 0.7:
+            return True
+        if (up_energy < ENERGY_ZERO_THRESHOLD and down_energy > MIN_ENERGY_TO_MOVE) or \
+           (down_energy < ENERGY_ZERO_THRESHOLD and up_energy > MIN_ENERGY_TO_MOVE):
+            return True
+        if abs(change_5m) > 8.0:
+            return True
+        if rsi6 > 80 or rsi6 < 20:
+            return True
+        return False
+
+    def analyze(self) -> Optional[Dict]:
+        try:
+            self.last_latency = self.latency_comp.measure_latency()
+            if self.last_latency > self.latency_comp.get_adaptive_threshold():
+                return self._build_latency_result()
+
+            price = self.fetcher.get_price()
+            if not price:
+                return None
+
+            k1m = self.fetcher.get_klines("1m", 100)
+            if not k1m:
+                return None
+
+            k5m = self.fetcher.get_klines("5m", 50)
+
+            closes_1m = k1m["closes"]
+            highs_1m = k1m["highs"]
+            lows_1m = k1m["lows"]
+            volumes_1m = k1m["volumes"]
+
+            latest_volume = volumes_1m[-1] if volumes_1m else 0.0
+            if len(volumes_1m) >= 10:
+                volume_ma10 = sum(volumes_1m[-10:]) / 10
+            else:
+                volume_ma10 = latest_volume
+
+            order_book = self.fetcher.get_order_book(50)
+            trades_rest = self.fetcher.get_trades(500)
+            oi = self.fetcher.get_open_interest()
+            oi_history = self.fetcher.get_oi_history(2)
+            funding_rate = self.fetcher.get_funding_rate()
+
+            ws_trades = []
+            ws_order_book = None
+            if self.ws and self.ws.connected:
+                ws_data = self.ws.get_latest()
+                ws_trades = ws_data["trades"]
+                ws_order_book = ws_data["order_book"]
+
+            trades = ws_trades if ws_trades else (trades_rest or [])
+            if ws_order_book and ws_order_book.get("bids"):
+                order_book = ws_order_book
+
+            rsi6 = IndicatorCalculator.calculate_rsi(closes_1m, 6)
+            rsi14 = IndicatorCalculator.calculate_rsi(closes_1m, 14)
+            stoch_k, stoch_d = IndicatorCalculator.calculate_stoch(highs_1m, lows_1m, closes_1m)
+            obv, obv_trend, obv_value = IndicatorCalculator.calculate_obv(closes_1m, volumes_1m)
+            obv_magnitude = "HIGH" if abs(obv_value) > 50_000_000 else "MEDIUM" if abs(obv_value) > 10_000_000 else "LOW"
+            liq = IndicatorCalculator.get_liquidation_zones(highs_1m, lows_1m, price)
+
+            ma25 = IndicatorCalculator.calculate_ma(closes_1m, 25)
+            ma99 = IndicatorCalculator.calculate_ma(closes_1m, 99)
+
+            vol_5m = sum(volumes_1m[-5:]) if len(volumes_1m) >= 5 else 0
+            vol_10m = sum(volumes_1m[-10:]) if len(volumes_1m) >= 10 else 0
+            volume_ratio = safe_div(vol_5m, vol_10m, 1.0)
+
+            if len(closes_1m) >= 5:
+                change_5m = ((closes_1m[-1] - closes_1m[-6]) / closes_1m[-6]) * 100
+            else:
+                change_5m = 0.0
+
+            rsi6_5m = 50.0
+            if k5m and len(k5m["closes"]) >= 6:
+                rsi6_5m = IndicatorCalculator.calculate_rsi(k5m["closes"], 6)
+
+            up_energy, down_energy = IndicatorCalculator.calculate_energy(order_book if order_book else {})
+            retail_flow = IndicatorCalculator.calculate_retail_order_flow(trades) if trades else 1.0
+
+            if trades:
+                buys = 0
+                sells = 0
+                for t in trades:
+                    is_sell = t.get('m', False) or t.get('isBuyerMaker', False)
+                    if is_sell:
+                        sells += 1
+                    else:
+                        buys += 1
+                agg = safe_div(buys, buys + sells, 0.5)
+                flow = agg
+            else:
+                agg, flow = 0.5, 0.5
+
+            oi_delta = 0.0
+            if oi_history and len(oi_history) >= 2:
+                oi_delta = ((oi_history[0] - oi_history[1]) / oi_history[1]) * 100 if oi_history[1] != 0 else 0
+
+            volatility = (max(highs_1m[-20:]) - min(lows_1m[-20:])) / price if price > 0 else 0
+
+            ofi_raw = OrderFlowImbalance.calculate(trades, window_ms=2000)
+            current_time = time.time()
+            if ofi_raw["bias"] == self.prev_ofi_bias and (current_time - self.prev_ofi_timestamp) >= self.ofi_consistency_required:
+                ofi = ofi_raw
+            else:
+                if ofi_raw["bias"] != self.prev_ofi_bias:
+                    self.prev_ofi_bias = ofi_raw["bias"]
+                    self.prev_ofi_timestamp = current_time
+                ofi = {"bias": self.prev_ofi_bias, "strength": ofi_raw["strength"]}
+
+            iceberg = IcebergDetector.detect(trades, price) if trades else {"detected": False}
+            cross_lead = CrossExchangeLeader.check_leader(self.symbol)
+            funding_trap = FundingRateTrap.detect(funding_rate or 0, oi or 0)
+            liq_heat = LiquidationHeatMap.fetch_real_liq(self.symbol)
+
+            # ========== NEW: OrderBook Slope ==========
+            bid_slope, ask_slope = OrderBookSlope.calculate(order_book)
+            slope_signal = OrderBookSlope.signal(bid_slope, ask_slope)
+
+            # ========== NEW: Latency Arbitrage Predictor ==========
+            predicted_price = LatencyArbitragePredictor.predict_next_price(
+                price, change_5m, up_energy, down_energy, LATENCY_MS_ESTIMATE
+            )
+
+            # ========== NEW: Overbought / Oversold Distribution Traps (Priority -261) ==========
+            overbought_trap = OverboughtDistributionTrap.detect(
+                rsi6, liq["short_dist"], volume_ratio,
+                down_energy, up_energy, ofi["bias"], ofi["strength"], change_5m
+            )
+            if overbought_trap["override"]:
+                final_bias = overbought_trap["bias"]
+                final_reason = overbought_trap["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "OVERBOUGHT_DISTRIBUTION_TRAP"
+                priority = overbought_trap["priority"]
+                # default untuk variabel yang mungkin tidak didefinisikan
+                algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}
+                hft_6pct = {"bias": "NEUTRAL", "reason": ""}
+            else:
+                oversold_trap = OversoldSqueezeTrap.detect(
+                    rsi6, liq["long_dist"], volume_ratio,
+                    up_energy, down_energy, ofi["bias"], ofi["strength"], change_5m
+                )
+                if oversold_trap["override"]:
+                    final_bias = oversold_trap["bias"]
+                    final_reason = oversold_trap["reason"]
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "OVERSOLD_SQUEEZE_TRAP"
+                    priority = oversold_trap["priority"]
+                    algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}
+                    hft_6pct = {"bias": "NEUTRAL", "reason": ""}
+                else:
+                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"])
+                    if empty_book["override"]:
+                        final_bias = empty_book["bias"]
+                        final_reason = empty_book["reason"]
+                        final_confidence = "ABSOLUTE"
+                        final_phase = "EMPTY_BOOK_TRAP"
+                        priority = empty_book["priority"]
+                        algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}
+                        hft_6pct = {"bias": "NEUTRAL", "reason": ""}
+                    else:
+                        # ========== NEW: Probabilistic Engine ==========
+                        prob_engine = ProbabilisticEngine()
+                        algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}  # default
+                        hft_6pct = {"bias": "NEUTRAL", "reason": ""}            # default
+
+                        # ========== HIGH PRIORITY OVERRIDES (with priority order) ==========
+                        # 1. Squeeze Continuation Detector (NEW)
+                        squeeze_cont = SqueezeContinuationDetector.detect(
+                            rsi6_5m, change_5m, volume_ratio,
+                            liq["short_dist"], up_energy, down_energy,
+                            ofi["bias"], ofi["strength"], bid_slope, ask_slope
+                        )
+                        if squeeze_cont["override"]:
+                            final_bias = squeeze_cont["bias"]
+                            final_reason = squeeze_cont["reason"]
+                            final_confidence = "ABSOLUTE"
+                            final_phase = "SQUEEZE_CONTINUATION"
+                            priority = squeeze_cont["priority"]
+                            prob_engine.add(squeeze_cont["bias"], 5.0)
+                        else:
+                            # 2. Cascade Dump Detector
+                            cascade = CascadeDumpDetector.detect(change_5m, liq["short_dist"], down_energy, volume_ratio)
+                            if cascade["override"]:
+                                final_bias = cascade["bias"]
+                                final_reason = cascade["reason"]
+                                final_confidence = "ABSOLUTE"
+                                final_phase = "CASCADE_DUMP"
+                                priority = cascade["priority"]
+                                prob_engine.add(cascade["bias"], 5.0)
+                            else:
+                                # 3. Low Volume Continuation
+                                low_vol_cont = LowVolumeContinuation.detect(volume_ratio, obv_trend, price, ma25, ma99, down_energy)
+                                if low_vol_cont["override"]:
+                                    final_bias = low_vol_cont["bias"]
+                                    final_reason = low_vol_cont["reason"]
+                                    final_confidence = "ABSOLUTE"
+                                    final_phase = "LOW_VOL_CONT"
+                                    priority = low_vol_cont["priority"]
+                                    prob_engine.add(low_vol_cont["bias"], 4.0)
+                                else:
+                                    # 4. Fake Bounce Trap
+                                    fake_bounce = FakeBounceTrap.detect(
+                                        rsi6, change_5m, volume_ratio,
+                                        liq["short_dist"], liq["long_dist"],
+                                        up_energy, down_energy,
+                                        ofi["bias"], ofi["strength"]
+                                    )
+                                    if fake_bounce["override"]:
+                                        final_bias = fake_bounce["bias"]
+                                        final_reason = fake_bounce["reason"]
+                                        final_confidence = "ABSOLUTE"
+                                        final_phase = "FAKE_BOUNCE"
+                                        priority = fake_bounce["priority"]
+                                        prob_engine.add(fake_bounce["bias"], 4.0)
+                                    else:
+                                        # Continue with other overrides as before
+                                        flush = LiquidityFlushConfirmation.detect(liq["short_dist"], liq["long_dist"], agg)
+                                        if flush["wait"]:
+                                            return self._build_result(price, rsi6, rsi14, stoch_k, stoch_d, obv_trend, obv_value,
+                                                                      volume_ratio, change_5m, liq, up_energy, down_energy,
+                                                                      agg, flow, "WAIT", "ABSOLUTE", flush["reason"],
+                                                                      "FLUSH_CONFIRMATION", -255, ofi, iceberg, funding_trap, liq_heat,
+                                                                      cross_lead, None, funding_rate, latest_volume, volume_ma10, rsi6_5m)
+
+                                        dead_market = DeadMarketProximityRule.detect(agg, flow, liq["short_dist"], liq["long_dist"],
+                                                                                     up_energy, down_energy)
+                                        if dead_market["override"]:
+                                            final_bias = dead_market["bias"]
+                                            final_reason = dead_market["reason"]
+                                            final_confidence = "ABSOLUTE"
+                                            final_phase = "DEAD_MARKET"
+                                            priority = dead_market["priority"]
+                                            prob_engine.add(dead_market["bias"], 3.0)
+                                        else:
+                                            extreme_oversold = ExtremeOversoldReversalFilter.detect(
+                                                rsi6, rsi14, stoch_k, obv_value, obv_trend,
+                                                liq["long_dist"], down_energy,
+                                                ofi["bias"], ofi["strength"], change_5m
+                                            )
+                                            if extreme_oversold["override"]:
+                                                final_bias = extreme_oversold["bias"]
+                                                final_reason = extreme_oversold["reason"]
+                                                final_confidence = "ABSOLUTE"
+                                                final_phase = "EXTREME_OVERSOLD_REVERSAL"
+                                                priority = extreme_oversold["priority"]
+                                                prob_engine.add(extreme_oversold["bias"], 3.0)
+                                            else:
+                                                panic_exhaustion = PanicDropExhaustionDetector.detect(
+                                                    change_5m, volume_ratio, rsi6, down_energy, obv_trend
+                                                )
+                                                if panic_exhaustion["override"]:
+                                                    final_bias = panic_exhaustion["bias"]
+                                                    final_reason = panic_exhaustion["reason"]
+                                                    final_confidence = "ABSOLUTE"
+                                                    final_phase = "PANIC_EXHAUSTION"
+                                                    priority = panic_exhaustion["priority"]
+                                                    prob_engine.add(panic_exhaustion["bias"], 3.0)
+                                                else:
+                                                    short_squeeze = ShortSqueezeTrapDetector.detect(
+                                                        liq["long_dist"], rsi6, ofi["bias"], ofi["strength"], down_energy, agg, flow
+                                                    )
+                                                    if short_squeeze["override"]:
+                                                        final_bias = short_squeeze["bias"]
+                                                        final_reason = short_squeeze["reason"]
+                                                        final_confidence = "ABSOLUTE"
+                                                        final_phase = "SHORT_SQUEEZE_TRAP"
+                                                        priority = short_squeeze["priority"]
+                                                        prob_engine.add(short_squeeze["bias"], 3.0)
+                                                    else:
+                                                        fake_energy = HFTTrapDetector.detect_fake_energy(down_energy, up_energy, change_5m, volume_ratio, rsi14)
+                                                        if fake_energy["override"]:
+                                                            final_bias = fake_energy["bias"]
+                                                            final_reason = fake_energy["reason"]
+                                                            final_confidence = "ABSOLUTE"
+                                                            final_phase = "FAKE_ENERGY_TRAP"
+                                                            priority = fake_energy["priority"]
+                                                            prob_engine.add(fake_energy["bias"], 4.0)
+                                                        else:
+                                                            oversold_cont = OversoldContinuation.detect(rsi6, obv_trend, price, ma25, ma99, volume_ratio, down_energy)
+                                                            if oversold_cont["override"]:
+                                                                final_bias = oversold_cont["bias"]
+                                                                final_reason = oversold_cont["reason"]
+                                                                final_confidence = "ABSOLUTE"
+                                                                final_phase = "OVERSOLD_CONT"
+                                                                priority = oversold_cont["priority"]
+                                                                prob_engine.add(oversold_cont["bias"], 3.0)
+                                                            else:
+                                                                oversold_bounce = OversoldBounce.detect(rsi6, obv_trend, down_energy, liq["long_dist"],
+                                                                                                        price, liq["recent_low"], up_energy, ma25, ma99)
+                                                                if oversold_bounce["override"]:
+                                                                    final_bias = oversold_bounce["bias"]
+                                                                    final_reason = oversold_bounce["reason"]
+                                                                    final_confidence = "ABSOLUTE"
+                                                                    final_phase = "OVERSOLD_BOUNCE"
+                                                                    priority = oversold_bounce["priority"]
+                                                                    prob_engine.add(oversold_bounce["bias"], 3.0)
+                                                                else:
+                                                                    ofi_extreme = OFIExtremeOversoldConfirm.detect(rsi6, ofi["bias"], ofi["strength"],
+                                                                                                                   liq["long_dist"], down_energy, up_energy,
+                                                                                                                   volume_ratio)
+                                                                    if ofi_extreme["override"]:
+                                                                        final_bias = ofi_extreme["bias"]
+                                                                        final_reason = ofi_extreme["reason"]
+                                                                        final_confidence = "ABSOLUTE"
+                                                                        final_phase = "OFI_EXTREME_CONFIRM"
+                                                                        priority = ofi_extreme["priority"]
+                                                                        prob_engine.add(ofi_extreme["bias"], 3.0)
+                                                                    else:
+                                                                        strong_bearish = StrongBearishOverride.detect(rsi6, obv_trend, price, ma25, ma99, volume_ratio, down_energy)
+                                                                        if strong_bearish["override"]:
+                                                                            final_bias = strong_bearish["bias"]
+                                                                            final_reason = strong_bearish["reason"]
+                                                                            final_confidence = "ABSOLUTE"
+                                                                            final_phase = "STRONG_BEARISH"
+                                                                            priority = strong_bearish["priority"]
+                                                                            prob_engine.add(strong_bearish["bias"], 3.0)
+                                                                        else:
+                                                                            ofi_conflict = OFIConflictFilter.detect(ofi["bias"], ofi["strength"],
+                                                                                                                    liq["short_dist"], liq["long_dist"],
+                                                                                                                    up_energy, down_energy, rsi6, change_5m)
+                                                                            if ofi_conflict["override"]:
+                                                                                final_bias = ofi_conflict["bias"]
+                                                                                final_reason = ofi_conflict["reason"]
+                                                                                final_confidence = "ABSOLUTE"
+                                                                                final_phase = "OFI_CONFLICT"
+                                                                                priority = ofi_conflict["priority"]
+                                                                                prob_engine.add(ofi_conflict["bias"], 3.0)
+                                                                            else:
+                                                                                liq_priority_energy = LiquidityPriorityEnergyCheck.detect(
+                                                                                    liq["short_dist"], liq["long_dist"],
+                                                                                    up_energy, down_energy, change_5m
+                                                                                )
+                                                                                if liq_priority_energy["override"]:
+                                                                                    final_bias = liq_priority_energy["bias"]
+                                                                                    final_reason = liq_priority_energy["reason"]
+                                                                                    final_confidence = "ABSOLUTE"
+                                                                                    final_phase = "LIQUIDITY_PRIORITY_ENERGY_CHECK"
+                                                                                    priority = liq_priority_energy["priority"]
+                                                                                    prob_engine.add(liq_priority_energy["bias"], 3.0)
+                                                                                else:
+                                                                                    overbought_trap_old = OverboughtLiquidityTrap.detect(
+                                                                                        liq["short_dist"], liq["long_dist"],
+                                                                                        rsi6, up_energy, down_energy,
+                                                                                        ofi["bias"], ofi["strength"], volume_ratio
+                                                                                    )
+                                                                                    if overbought_trap_old["override"]:
+                                                                                        final_bias = overbought_trap_old["bias"]
+                                                                                        final_reason = overbought_trap_old["reason"]
+                                                                                        final_confidence = "ABSOLUTE"
+                                                                                        final_phase = "OVERBOUGHT_LIQ_TRAP"
+                                                                                        priority = overbought_trap_old["priority"]
+                                                                                        prob_engine.add(overbought_trap_old["bias"], 3.0)
+                                                                                    else:
+                                                                                        liq_priority = LiquidityPriorityOverride.detect(liq["short_dist"], liq["long_dist"], volume_ratio)
+                                                                                        if liq_priority["override"]:
+                                                                                            bait = LiquidityBaitDetector.detect(liq["short_dist"], liq["long_dist"],
+                                                                                                                                up_energy, down_energy, agg, flow, volume_ratio)
+                                                                                            if bait["override"]:
+                                                                                                final_bias = bait["bias"]
+                                                                                                final_reason = bait["reason"]
+                                                                                                final_confidence = "ABSOLUTE"
+                                                                                                final_phase = "LIQUIDITY_BAIT"
+                                                                                                priority = bait["priority"]
+                                                                                                prob_engine.add(bait["bias"], 3.0)
+                                                                                            else:
+                                                                                                final_bias = liq_priority["bias"]
+                                                                                                final_reason = liq_priority["reason"]
+                                                                                                final_confidence = "ABSOLUTE"
+                                                                                                final_phase = "LIQUIDITY_PRIORITY"
+                                                                                                priority = liq_priority["priority"]
+                                                                                                prob_engine.add(liq_priority["bias"], 3.0)
+                                                                                        else:
+                                                                                            liq_energy = LiquidityEnergyCheck.detect(
+                                                                                                liq["short_dist"], liq["long_dist"],
+                                                                                                up_energy, down_energy,
+                                                                                                volume_ratio, ofi["bias"], ofi["strength"], rsi6_5m,
+                                                                                                obv_magnitude
+                                                                                            )
+                                                                                            if liq_energy["override"]:
+                                                                                                final_bias = liq_energy["bias"]
+                                                                                                final_reason = liq_energy["reason"]
+                                                                                                final_confidence = "ABSOLUTE"
+                                                                                                final_phase = "LIQUIDITY_ENERGY_TRAP"
+                                                                                                priority = liq_energy["priority"]
+                                                                                                prob_engine.add(liq_energy["bias"], 3.0)
+                                                                                            else:
+                                                                                                energy_imbalance = ExtremeEnergyImbalance.detect(
+                                                                                                    up_energy, down_energy, volume_ratio, rsi14,
+                                                                                                    change_5m, ofi["bias"], ofi["strength"],
+                                                                                                    rsi6, rsi6_5m
+                                                                                                )
+                                                                                                if energy_imbalance["override"]:
+                                                                                                    final_bias = energy_imbalance["bias"]
+                                                                                                    final_reason = energy_imbalance["reason"]
+                                                                                                    final_confidence = "ABSOLUTE"
+                                                                                                    final_phase = "ENERGY_IMBALANCE"
+                                                                                                    priority = energy_imbalance["priority"]
+                                                                                                    prob_engine.add(energy_imbalance["bias"], 3.0)
+                                                                                                else:
+                                                                                                    thin_pump = ThinOrderBookPump.detect(up_energy, down_energy, change_5m, volume_ratio,
+                                                                                                                                         ofi["bias"], ofi["strength"])
+                                                                                                    if thin_pump["override"]:
+                                                                                                        final_bias = thin_pump["bias"]
+                                                                                                        final_reason = thin_pump["reason"]
+                                                                                                        final_confidence = "ABSOLUTE"
+                                                                                                        final_phase = "THIN_ORDER_BOOK_PUMP"
+                                                                                                        priority = thin_pump["priority"]
+                                                                                                        prob_engine.add(thin_pump["bias"], 3.0)
+                                                                                                    else:
+                                                                                                        energy_trap = EnergyTrapFilter.detect(up_energy, down_energy, change_5m, volume_ratio, rsi14)
+                                                                                                        if energy_trap["override"]:
+                                                                                                            final_bias = energy_trap["bias"]
+                                                                                                            final_reason = energy_trap["reason"]
+                                                                                                            final_confidence = "ABSOLUTE"
+                                                                                                            final_phase = "ENERGY_TRAP"
+                                                                                                            priority = energy_trap["priority"]
+                                                                                                            prob_engine.add(energy_trap["bias"], 3.0)
+                                                                                                        else:
+                                                                                                            energy_gap = EnergyGapTrapDetector.detect(rsi14, up_energy, down_energy)
+                                                                                                            if energy_gap["override"]:
+                                                                                                                final_bias = energy_gap["bias"]
+                                                                                                                final_reason = energy_gap["reason"]
+                                                                                                                final_confidence = "ABSOLUTE"
+                                                                                                                final_phase = "ENERGY_GAP_TRAP"
+                                                                                                                priority = energy_gap["priority"]
+                                                                                                                prob_engine.add(energy_gap["bias"], 3.0)
+                                                                                                            else:
+                                                                                                                # If no override, fallback to voting and other signals
+                                                                                                                # First, add all non‑critical signals to the probabilistic engine
+                                                                                                                # This includes: OFI, energy, liquidity, momentum, algo, hft, etc.
+                                                                                                                prob_engine.add(ofi["bias"], ofi["strength"] * 2.0)
+                                                                                                                if up_energy < down_energy:
+                                                                                                                    prob_engine.add("LONG", 1.0)
+                                                                                                                else:
+                                                                                                                    prob_engine.add("SHORT", 1.0)
+                                                                                                                if liq["short_dist"] < liq["long_dist"]:
+                                                                                                                    prob_engine.add("LONG", 1.0)
+                                                                                                                else:
+                                                                                                                    prob_engine.add("SHORT", 1.0)
+                                                                                                                wmi = self.fetcher.calculate_wmi(liq["short_dist"], liq["long_dist"])
+                                                                                                                if wmi > 20:
+                                                                                                                    prob_engine.add("LONG", 0.5)
+                                                                                                                elif wmi < -20:
+                                                                                                                    prob_engine.add("SHORT", 0.5)
+                                                                                                                if rsi6 > 50 and stoch_k > stoch_d:
+                                                                                                                    prob_engine.add("LONG", 0.5)
+                                                                                                                elif rsi6 < 50 and stoch_k < stoch_d:
+                                                                                                                    prob_engine.add("SHORT", 0.5)
+
+                                                                                                                algo_type = AlgoTypeAnalyzer.analyze(order_book, trades, price, liq["short_dist"], liq["long_dist"],
+                                                                                                                                                     up_energy, down_energy)
+                                                                                                                prob_engine.add(algo_type["bias"], 1.2)
+                                                                                                                hft_6pct = HFT6PercentDirection.determine(price, liq["short_dist"], liq["long_dist"],
+                                                                                                                                                          up_energy, down_energy, oi_delta, agg, flow)
+                                                                                                                prob_engine.add(hft_6pct["bias"], 1.5)
+
+                                                                                                                # Slope signal
+                                                                                                                if slope_signal["bias"] != "NEUTRAL":
+                                                                                                                    prob_engine.add(slope_signal["bias"], 1.0)
+
+                                                                                                                # Funding trap
+                                                                                                                if funding_trap["bias"] != "NEUTRAL":
+                                                                                                                    prob_engine.add(funding_trap["bias"], 2.0)
+
+                                                                                                                # Get probabilistic result
+                                                                                                                prob_bias, prob_conf = prob_engine.result()
+
+                                                                                                                # Also run the existing voting system for consistency
+                                                                                                                strategy_signals = {}
+                                                                                                                if liq["short_dist"] < liq["long_dist"]:
+                                                                                                                    strategy_signals["liquidity_proximity"] = "LONG"
+                                                                                                                else:
+                                                                                                                    strategy_signals["liquidity_proximity"] = "SHORT"
+                                                                                                                if up_energy < down_energy:
+                                                                                                                    strategy_signals["energy"] = "LONG"
+                                                                                                                else:
+                                                                                                                    strategy_signals["energy"] = "SHORT"
+                                                                                                                if wmi > 20:
+                                                                                                                    strategy_signals["distribution"] = "LONG"
+                                                                                                                elif wmi < -20:
+                                                                                                                    strategy_signals["distribution"] = "SHORT"
+                                                                                                                if rsi6 > 50 and stoch_k > stoch_d:
+                                                                                                                    strategy_signals["momentum"] = "LONG"
+                                                                                                                elif rsi6 < 50 and stoch_k < stoch_d:
+                                                                                                                    strategy_signals["momentum"] = "SHORT"
+                                                                                                                if algo_type["bias"] != "NEUTRAL":
+                                                                                                                    strategy_signals["algo_type"] = algo_type["bias"]
+                                                                                                                if hft_6pct["bias"] != "NEUTRAL":
+                                                                                                                    strategy_signals["hft_6pct"] = hft_6pct["bias"]
+                                                                                                                if ofi["bias"] != "NEUTRAL":
+                                                                                                                    strategy_signals["ofi"] = ofi["bias"]
+
+                                                                                                                self.voter.update_weights({"agg": agg, "flow": flow})
+                                                                                                                vote_result = self.voter.vote(strategy_signals)
+
+                                                                                                                # Combine probabilistic with voting
+                                                                                                                # If both agree, confidence high; if disagree, we take the one with higher probability
+                                                                                                                if prob_bias != "NEUTRAL" and vote_result["bias"] != "NEUTRAL":
+                                                                                                                    if prob_bias == vote_result["bias"]:
+                                                                                                                        final_bias = prob_bias
+                                                                                                                        final_reason = f"Probabilistic ({prob_conf:.1%}) + Voting consensus"
+                                                                                                                        final_confidence = "ABSOLUTE" if prob_conf > 0.7 else "HIGH"
+                                                                                                                    else:
+                                                                                                                        # Choose the one with higher probability
+                                                                                                                        if prob_conf > vote_result["confidence"]:
+                                                                                                                            final_bias = prob_bias
+                                                                                                                            final_reason = f"Probabilistic override ({prob_conf:.1%}) over voting ({vote_result['confidence']:.1%})"
+                                                                                                                        else:
+                                                                                                                            final_bias = vote_result["bias"]
+                                                                                                                            final_reason = f"Voting override ({vote_result['confidence']:.1%}) over probabilistic ({prob_conf:.1%})"
+                                                                                                                        final_confidence = "ABSOLUTE" if max(prob_conf, vote_result["confidence"]) > 0.7 else "HIGH"
+                                                                                                                elif prob_bias != "NEUTRAL":
+                                                                                                                    final_bias = prob_bias
+                                                                                                                    final_reason = f"Probabilistic engine: {prob_conf:.1%}"
+                                                                                                                    final_confidence = "ABSOLUTE" if prob_conf > 0.7 else "HIGH"
+                                                                                                                elif vote_result["bias"] != "NEUTRAL":
+                                                                                                                    final_bias = vote_result["bias"]
+                                                                                                                    final_reason = f"Voting: {vote_result['confidence']:.1%}"
+                                                                                                                    final_confidence = "ABSOLUTE" if vote_result["confidence"] > 0.7 else "HIGH"
+                                                                                                                else:
+                                                                                                                    # Ultimate fallback: liquidity proximity
+                                                                                                                    final_bias = "LONG" if liq["short_dist"] < liq["long_dist"] else "SHORT"
+                                                                                                                    final_reason = "Fallback to liquidity proximity"
+                                                                                                                    final_confidence = "MEDIUM"
+                                                                                                                final_phase = "PROBABILISTIC_VOTING"
+                                                                                                                priority = 0
+
+            # ========== Anti‑reversal guard ==========
+            if AntiReversalGuard.should_block(obv_trend, rsi6, volume_ratio):
+                if final_bias == "LONG":
+                    final_bias = "SHORT"
+                    final_reason = f"Anti‑reversal guard: OBV extreme, RSI {rsi6:.1f}<30, low volume → blocking LONG, force SHORT"
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "ANTI_REVERSAL"
+
+            # ========== Latency arb check ==========
+            if not LatencyArbitragePredictor.is_safe(final_bias, price, predicted_price):
+                final_bias = "WAIT"
+                final_reason = f"Latency arb: predicted {predicted_price:.2f} vs current {price:.2f} → waiting"
+                final_confidence = "ABSOLUTE"
+                final_phase = "LATENCY_ARB_WAIT"
+
+            # Apply volume confidence and multi‑TF filters
+            if final_bias in ["LONG", "SHORT"]:
+                final_confidence, final_reason = VolumeConfidenceFilter.apply(volume_ratio, final_confidence, final_reason)
+                if rsi6_5m is not None:
+                    final_confidence, final_reason = MultiTimeframeConfirmation.check(rsi6, rsi6_5m, final_confidence, final_reason)
+                final_bias, final_reason = OBVStochasticReversal.apply(
+                    obv_trend, obv_value, stoch_k, stoch_d, final_bias, final_reason,
+                    volume_ratio, rsi6, rsi6_5m
+                )
+
+            volume_trap = VolumeTrapDetector.detect(volume_ratio, change_5m, final_bias)
+            if volume_trap["warning"]:
+                if final_confidence == "ABSOLUTE":
+                    final_confidence = "MEDIUM"
+                final_reason += f" | {volume_trap['reason']}"
+
+            if volume_ratio < 0.8 and ofi["bias"] == "NEUTRAL":
+                if final_bias != "NEUTRAL":
+                    final_confidence = "MEDIUM" if final_confidence == "ABSOLUTE" else final_confidence
+                    final_reason += f" | Low volume ({volume_ratio:.2f}x) & OFI neutral → caution"
+
+            # ========== Compute floating PnL ==========
+            floating_pnl = self.state_mgr.get_floating_pnl_pct(price)
+
+            # ========== FIXED Volume Filter: Jangan reverse jika dekat likuiditas ==========
+            if final_bias in ["LONG", "SHORT"] and len(volumes_1m) >= 10:
+                if latest_volume < volume_ma10:
+                    # Deteksi apakah kita berada di zona squeeze (likuiditas dekat)
+                    is_near_liquidity = liq["short_dist"] < LIQ_SQUEEZE_THRESHOLD or liq["long_dist"] < LIQ_SQUEEZE_THRESHOLD
+                    if not self._is_strong_signal(ofi, up_energy, down_energy, change_5m, rsi6) and not is_near_liquidity:
+                        original_bias = final_bias
+                        final_bias = "LONG" if original_bias == "SHORT" else "SHORT"
+                        final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} → reverse from {original_bias} to {final_bias}"
+                        final_confidence = "ABSOLUTE"
+                        final_phase = "VOLUME_FILTER_REVERSE"
+                    elif is_near_liquidity:
+                        # Jika volume rendah tapi dekat liq, pertahankan arah liq (squeeze play)
+                        final_reason += f" | Volume Low but Near Liquidity ({liq['short_dist']}%/{liq['long_dist']}%) → Hold Squeeze Bias"
+                        if final_confidence == "ABSOLUTE":
+                            final_confidence = "HIGH"
+                    else:
+                        final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} (warning, but signal strong)"
+
+            # ========== Low Cap Mode ==========
+            if latest_volume < LOW_CAP_VOLUME_THRESHOLD:
+                # Aktifkan mode sniper squeeze: fokus pada likuiditas dan order book
+                final_reason += " | Low cap mode activated: prioritizing liquidity"
+                # Jika sudah dekat likuiditas, pastikan arah mengikuti liq
+                if liq["short_dist"] < liq["long_dist"]:
+                    if final_bias != "LONG":
+                        final_bias = "LONG"
+                        final_reason = f"Low cap mode: overriding to LONG (short liq closer)"
+                else:
+                    if final_bias != "SHORT":
+                        final_bias = "SHORT"
+                        final_reason = f"Low cap mode: overriding to SHORT (long liq closer)"
+                final_confidence = "ABSOLUTE"
+                final_phase = "LOW_CAP_SNIPER"
+
+            # Latency compensator
+            final_bias = self.latency_comp.adjust_signal(final_bias, self.last_latency)
+
+            # Time decay filter (anti‑flip)
+            final_bias = TimeDecayFilter.apply(final_bias)
+
+            # Position sizing
+            trap_strength = 0.0
+            if "Fake bounce" in final_reason or "Cascade dump" in final_reason:
+                trap_strength = 0.7
+            elif "Low volume continuation" in final_reason:
+                trap_strength = 0.5
+            elif "Empty Book Trap" in final_reason:
+                trap_strength = 0.8
+            else:
+                trap_strength = 0.2
+            position_multiplier = PositionSizer.size(prob_conf if 'prob_conf' in locals() else 0.5, trap_strength, volume_ratio)
+
+            # Update state
+            if final_bias in ["LONG", "SHORT"] and final_bias != self.state_mgr.last_bias:
+                self.state_mgr.update_position(final_bias, price)
+
+            # Build result dictionary
+            result = {
+                "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+                "symbol": self.symbol,
+                "price": round(price, 4),
+                "rsi6": round(rsi6, 1),
+                "rsi14": round(rsi14, 1),
+                "stoch_k": round(stoch_k, 1),
+                "stoch_d": round(stoch_d, 1),
+                "stoch_j": round(3 * stoch_k - 2 * stoch_d, 1),
+                "obv_trend": obv_trend,
+                "obv_value": round(obv_value, 2),
+                "obv_magnitude": "HIGH" if abs(obv_value) > 50_000_000 else "MEDIUM" if abs(obv_value) > 10_000_000 else "LOW",
+                "volume_ratio": round(volume_ratio, 2),
+                "change_5m": round(change_5m, 2),
+                "short_liq": liq["short_dist"],
+                "long_liq": liq["long_dist"],
+                "up_energy": round(up_energy, 2),
+                "down_energy": round(down_energy, 2),
+                "agg": round(agg, 2),
+                "flow": round(flow, 2),
+                "crowded_multiplier": 1.0,  # not used now
+                "bias": final_bias,
+                "confidence": final_confidence,
+                "reason": final_reason,
+                "phase": final_phase,
+                "priority_level": priority,
+                "algo_type_bias": algo_type["bias"],
+                "hft_6pct_bias": hft_6pct["bias"],
+                "hft_6pct_reason": hft_6pct["reason"],
+                "ofi_bias": ofi["bias"],
+                "ofi_strength": ofi["strength"],
+                "funding_rate": funding_rate,
+                "latency_ms": self.last_latency,
+                "latest_volume": round(latest_volume, 2),
+                "volume_ma10": round(volume_ma10, 2),
+                "floating_pnl": round(floating_pnl, 2),
+                "rsi6_5m": round(rsi6_5m, 1),
+                "bid_slope": round(bid_slope, 2),
+                "ask_slope": round(ask_slope, 2),
+                "predicted_price": round(predicted_price, 4),
+                "position_multiplier": round(position_multiplier, 2)
+            }
+
+            # Stability filter (global anti‑flip)
+            global LAST_BIAS, LAST_BIAS_TIME
+            now = time.time()
+            if LAST_BIAS is not None and result["bias"] != LAST_BIAS and (now - LAST_BIAS_TIME) < 1.0:
+                result["bias"] = LAST_BIAS
+                result["reason"] += " | Stability lock (anti-flip)"
+            if result["bias"] in ["LONG", "SHORT"]:
+                LAST_BIAS = result["bias"]
+                LAST_BIAS_TIME = now
+
+            return result
+
+        except Exception as e:
+            print(f"❌ Error analyzing {self.symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _build_result(self, price, rsi6, rsi14, stoch_k, stoch_d, obv_trend, obv_value,
+                      volume_ratio, change_5m, liq, up_energy, down_energy,
+                      agg, flow, final_bias, final_confidence, final_reason,
+                      final_phase, priority, ofi=None, iceberg=None, funding_trap=None, liq_heat=None,
+                      cross_lead=None, ws_data=None, funding_rate=None, latest_volume=None, volume_ma10=None, rsi6_5m=None):
+        # Apply volume confidence and multi-TF filters to override results
+        if final_bias in ["LONG", "SHORT"]:
+            final_confidence, final_reason = VolumeConfidenceFilter.apply(volume_ratio, final_confidence, final_reason)
+            if rsi6_5m is not None:
+                final_confidence, final_reason = MultiTimeframeConfirmation.check(rsi6, rsi6_5m, final_confidence, final_reason)
+            final_bias, final_reason = OBVStochasticReversal.apply(
+                obv_trend, obv_value, stoch_k, stoch_d, final_bias, final_reason,
+                volume_ratio, rsi6, rsi6_5m
+            )
+
+        volume_trap = VolumeTrapDetector.detect(volume_ratio, change_5m, final_bias)
+        if volume_trap["warning"]:
+            if final_confidence == "ABSOLUTE":
+                final_confidence = "MEDIUM"
+            final_reason += f" | {volume_trap['reason']}"
+
+        if volume_ratio < 0.8 and ofi is not None and ofi.get("bias") == "NEUTRAL":
+            if final_bias != "NEUTRAL":
+                final_confidence = "MEDIUM" if final_confidence == "ABSOLUTE" else final_confidence
+                final_reason += f" | Low volume ({volume_ratio:.2f}x) & OFI neutral → caution"
+
+        if latest_volume is not None and volume_ma10 is not None and final_bias in ["LONG", "SHORT"]:
+            if latest_volume < volume_ma10:
+                is_near_liquidity = liq["short_dist"] < LIQ_SQUEEZE_THRESHOLD or liq["long_dist"] < LIQ_SQUEEZE_THRESHOLD
+                if not self._is_strong_signal(ofi, up_energy, down_energy, change_5m, rsi6) and not is_near_liquidity:
+                    original_bias = final_bias
+                    final_bias = "LONG" if original_bias == "SHORT" else "SHORT"
+                    final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} → reverse from {original_bias} to {final_bias}"
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "VOLUME_FILTER_REVERSE"
+                elif is_near_liquidity:
+                    final_reason += f" | Volume Low but Near Liquidity ({liq['short_dist']}%/{liq['long_dist']}%) → Hold Squeeze Bias"
+                    if final_confidence == "ABSOLUTE":
+                        final_confidence = "HIGH"
+                else:
+                    final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} (warning, but signal strong)"
+
+        final_bias = self.latency_comp.adjust_signal(final_bias, self.last_latency)
+
+        result = {
+            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            "symbol": self.symbol,
+            "price": round(price, 4),
+            "rsi6": round(rsi6, 1),
+            "rsi14": round(rsi14, 1),
+            "stoch_k": round(stoch_k, 1),
+            "stoch_d": round(stoch_d, 1),
+            "stoch_j": round(3 * stoch_k - 2 * stoch_d, 1),
+            "obv_trend": obv_trend,
+            "obv_value": round(obv_value, 2),
+            "obv_magnitude": "HIGH" if abs(obv_value) > 50_000_000 else "MEDIUM" if abs(obv_value) > 10_000_000 else "LOW",
+            "volume_ratio": round(volume_ratio, 2),
+            "change_5m": round(change_5m, 2),
+            "short_liq": liq["short_dist"],
+            "long_liq": liq["long_dist"],
+            "up_energy": round(up_energy, 2),
+            "down_energy": round(down_energy, 2),
+            "agg": round(agg, 2),
+            "flow": round(flow, 2),
+            "crowded_multiplier": 1.0,
+            "bias": final_bias,
+            "confidence": final_confidence,
+            "reason": final_reason,
+            "phase": final_phase,
+            "priority_level": priority,
+            "algo_type_bias": "NEUTRAL",
+            "hft_6pct_bias": "NEUTRAL",
+            "hft_6pct_reason": "",
+            "ofi_bias": ofi["bias"] if ofi else "NEUTRAL",
+            "ofi_strength": ofi["strength"] if ofi else 0.0,
+            "funding_rate": funding_rate,
+            "latency_ms": self.last_latency,
+            "latest_volume": round(latest_volume, 2) if latest_volume else 0,
+            "volume_ma10": round(volume_ma10, 2) if volume_ma10 else 0,
+            "floating_pnl": 0.0,
+            "rsi6_5m": round(rsi6_5m, 1) if rsi6_5m else 0,
+            "bid_slope": 0.0,
+            "ask_slope": 0.0,
+            "predicted_price": 0.0,
+            "position_multiplier": 1.0
+        }
+
+        # Stability filter (global anti‑flip)
+        global LAST_BIAS, LAST_BIAS_TIME
+        now = time.time()
+        if LAST_BIAS is not None and result["bias"] != LAST_BIAS and (now - LAST_BIAS_TIME) < 1.0:
+            result["bias"] = LAST_BIAS
+            result["reason"] += " | Stability lock (anti-flip)"
+        if result["bias"] in ["LONG", "SHORT"]:
+            LAST_BIAS = result["bias"]
+            LAST_BIAS_TIME = now
+
+        return result
+
+    def _build_latency_result(self):
+        result = {
+            "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            "symbol": self.symbol,
+            "price": 0.0,
+            "bias": "WAIT",
+            "confidence": "ABSOLUTE",
+            "reason": f"High latency ({self.last_latency:.0f}ms) - skipping entry",
+            "phase": "LATENCY_WAIT",
+            "priority_level": -260,
+            "rsi6": 0, "rsi14": 0, "stoch_k": 0, "stoch_d": 0, "stoch_j": 0,
+            "obv_trend": "NEUTRAL", "obv_value": 0.0, "obv_magnitude": "LOW",
+            "volume_ratio": 0, "change_5m": 0,
+            "short_liq": 0, "long_liq": 0, "up_energy": 0, "down_energy": 0,
+            "agg": 0, "flow": 0, "crowded_multiplier": 1.0,
+            "algo_type_bias": "NEUTRAL", "hft_6pct_bias": "NEUTRAL", "hft_6pct_reason": "",
+            "ofi_bias": "NEUTRAL", "ofi_strength": 0.0,
+            "funding_rate": None, "latency_ms": self.last_latency,
+            "latest_volume": 0, "volume_ma10": 0, "floating_pnl": 0.0,
+            "rsi6_5m": 0, "bid_slope": 0.0, "ask_slope": 0.0, "predicted_price": 0.0,
+            "position_multiplier": 1.0
+        }
+        return result
+
+# ================= OUTPUT FORMATTER =================
+class OutputFormatter:
+    @staticmethod
+    def print_header():
+        print("\n" + "="*80)
+        print("🔥 BINANCE LIQUIDATION HUNTER - ULTIMATE EDITION v8 (LIQUIDITY SQUEEZE FOCUS)")
+        print("="*80)
+        print("\n🧠 INTEGRATED MODULES:")
+        print(" 📍 WebSocket Real-time Data (optional on Koyeb, no startup sleep)")
+        print(" 📍 Order Flow Imbalance (OFI) with smoothing and conflict filter")
+        print(" 📍 Iceberg Order Detector")
+        print(" 📍 Cross-Exchange Leader (placeholder)")
+        print(" 📍 Funding Rate Trap")
+        print(" 📍 Latency Compensator (adaptive threshold)")
+        print(" 📍 Data Caching (reduces REST calls)")
+        print(" 📍 ⭐ Stability Filter (anti‑flip within 1 second)")
+        print(" 📍 ⭐ Time Decay Filter (signal persistence)")
+        print(" 📍 ⭐ Low Volume Continuation Detector")
+        print(" 📍 ⭐ Anti‑Reversal Guard")
+        print(" 📍 ⭐ Cascade Dump Detector")
+        print(" 📍 ⭐ Fake Bounce Trap")
+        print(" 📍 ⭐ Order Book Slope Analysis")
+        print(" 📍 ⭐ Latency Arbitrage Predictor")
+        print(" 📍 ⭐ Probabilistic Scoring Engine")
+        print(" 📍 ⭐ Dynamic Position Sizing")
+        print(" 📍 ⭐ Overbought Distribution Trap (NEW) - overrides Empty Book Trap when overbought")
+        print(" 📍 ⭐ Oversold Squeeze Trap (NEW) - overrides when oversold")
+        print(" 📍 ⭐ Empty Book Trap (NEW)")
+        print(" 📍 ⭐ Squeeze Continuation Detector (NEW) - prevents SHORT traps in strong uptrend")
+        print(" 📍 ⭐ HFT6PercentDirection - Liquidity Priority (FIXED)")
+        print(" 📍 ⭐ Volume Filter - No Reversal Near Liquidity (FIXED)")
+        print(" 📍 ⭐ Low Cap Sniper Mode")
+        print("="*80 + "\n")
+
+    @staticmethod
+    def print_signal(result: Dict):
+        print("="*80)
+        print(f"🔥 {result.get('symbol', 'UNKNOWN')} @ {result.get('timestamp', '')}")
+        print(f"💰 Price: ${result.get('price', 0):.4f}")
+        print("="*80)
+
+        print(f"\n{'='*40}")
+        bias = result.get('bias', 'NEUTRAL')
+        bias_color = "🟢" if bias == "LONG" else "🔴" if bias == "SHORT" else "🟡"
+        conf = result.get('confidence', 'MEDIUM')
+        conf_icon = {"ABSOLUTE": "⚡⚡⚡", "HIGH": "🔥🔥🔥", "MEDIUM": "🔥🔥", "LOW": "🔥"}.get(conf, "🔥")
+        print(f"{bias_color} FINAL BIAS: {bias}")
+        print(f"{conf_icon} CONFIDENCE: {conf}")
+        print(f"📌 REASON: {result.get('reason', '')}")
+        print(f"🎯 PHASE: {result.get('phase', '')}")
+        print(f"💰 POSITION SIZE MULTIPLIER: {result.get('position_multiplier', 1.0):.2f}")
+
+        print(f"\n{'='*40}")
+        print("📊 KEY METRICS:")
+        print(f"📈 RSI(6): {result.get('rsi6', 0)} | RSI(14): {result.get('rsi14', 0)} | RSI(6) 5m: {result.get('rsi6_5m', 0)}")
+        print(f"🎲 Stochastic: K={result.get('stoch_k', 0):.1f} D={result.get('stoch_d', 0):.1f} J={result.get('stoch_j', 0):.1f}")
+        print(f"📊 OBV: {result.get('obv_trend', 'NEUTRAL')} (value: {result.get('obv_value', 0):,.0f}, magnitude: {result.get('obv_magnitude', 'LOW')})")
+        print(f"💸 Volume Ratio: {result.get('volume_ratio', 0):.2f}x | 5m Change: {result.get('change_5m', 0):.2f}%")
+        print(f"📊 Latest Volume: {result.get('latest_volume', 0):.2f} | Volume MA10: {result.get('volume_ma10', 0):.2f}")
+        print(f"🎯 Short Liq: +{result.get('short_liq', 0)}% | Long Liq: -{result.get('long_liq', 0)}%")
+        print(f"⚡ Energy: up={result.get('up_energy', 0):.2f} down={result.get('down_energy', 0):.2f}")
+        print(f"🧠 Agg/Flow: {result.get('agg', 0):.2f}/{result.get('flow', 0):.2f}")
+        print(f"🕒 Latency: {result.get('latency_ms', 0):.0f} ms")
+        print(f"💰 Floating PnL: {result.get('floating_pnl', 0):.2f}%")
+        print(f"📐 Order Book Slope: bid={result.get('bid_slope', 0):.2f} ask={result.get('ask_slope', 0):.2f}")
+        print(f"🔮 Predicted Price: ${result.get('predicted_price', 0):.4f}")
+
+        print("\n🎯 ALGO TYPE & HFT 6% DIRECTION:")
+        print(f" Algo Type Bias: {result.get('algo_type_bias', 'NEUTRAL')}")
+        print(f" HFT 6% Bias: {result.get('hft_6pct_bias', 'NEUTRAL')}")
+        print(f" HFT Reason: {result.get('hft_6pct_reason', '')}")
+
+        if result.get('ofi_bias') != "NEUTRAL":
+            print(f"\n📊 ORDER FLOW IMBALANCE: {result['ofi_bias']} (strength {result['ofi_strength']:.2f})")
+
+        if result.get('funding_rate') is not None:
+            print(f"💰 Funding Rate: {result['funding_rate']:.6f}")
+
+        print("\n" + "="*80)
+
+# ================= GLOBAL VARIABLES =================
+POPULAR_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT",
+    "PIPPINUSDT", "POWERUSDT", "SAHARAUSDT", "ROBOUSDT", "PHAUSDT",
+    "SIRENUSDT", "ARCUSDT", "RIVERUSDT", "JTOUSDT", "CYBERUSDT"
+]
+
+# ================= MAIN =================
+def main():
+    import sys
+
+    if len(sys.argv) > 1:
+        symbol = sys.argv[1].upper()
+    else:
+        symbol = input("\nSymbol (e.g. BTCUSDT): ").upper() or "BTCUSDT"
+
+    analyzer = BinanceAnalyzer(symbol)
+    OutputFormatter.print_header()
+
+    print(f"\n🔍 Analyzing {symbol}...")
+    result = analyzer.analyze()
+
+    if result:
+        OutputFormatter.print_signal(result)
+
+    if len(sys.argv) > 2 and sys.argv[2] == "--loop":
+        print("\n🔄 Auto-refresh every 10 seconds. Press Ctrl+C to stop.\n")
+        try:
+            while True:
+                time.sleep(10)
+                result = analyzer.analyze()
+                if result:
+                    print("\n" + "="*80)
+                    print(f"🔄 UPDATE @ {result['timestamp']}")
+                    print(f"🎯 Bias: {result['bias']} ({result['confidence']})")
+                    print(f"📌 {result['reason']}")
+        except KeyboardInterrupt:
+            print("\n\n👋 Stopped by user")
+    else:
+        print(f"❌ Failed to analyze {symbol}")
+
+def api_mode(symbol: str) -> str:
+    analyzer = BinanceAnalyzer(symbol)
+    result = analyzer.analyze()
+    if result:
+        return json.dumps(result, indent=2, default=str)
+    return json.dumps({"error": f"Failed to analyze {symbol}"})
+
+def batch_mode(symbols: List[str]):
+    OutputFormatter.print_header()
+    results = []
+    analyzers = {}
+    for sym in symbols:
+        analyzers[sym] = BinanceAnalyzer(sym)
+
+    print("\n" + "="*80)
+    print("📊 BATCH ANALYSIS RESULTS:")
+    print("="*80)
+
+    for sym in symbols:
+        print(f"\n🔍 Analyzing {sym}...")
+        result = analyzers[sym].analyze()
+        if result:
+            results.append(result)
+            bias_icon = "🟢" if result['bias'] == "LONG" else "🔴" if result['bias'] == "SHORT" else "🟡"
+            conf_icon = "⚡" if result['confidence'] == "ABSOLUTE" else "🔥" if result['confidence'] == "HIGH" else "📈"
+            print(f"{conf_icon} {bias_icon} {sym}: {result['bias']} ({result['confidence']})")
+            print(f" 📌 {result['reason']}")
+        else:
+            print(f"❌ {sym}: Failed")
+
+    print("\n" + "="*80)
+    return results
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--api":
+            symbol = sys.argv[2] if len(sys.argv) > 2 else "BTCUSDT"
+            print(api_mode(symbol))
+        elif sys.argv[1] == "--batch":
+            symbols = sys.argv[2:] if len(sys.argv) > 2 else POPULAR_SYMBOLS
+            batch_mode(symbols)
+        elif sys.argv[1] == "--help":
+            print("""
+🔥 Binance Liquidation Hunter - Ultimate Edition v8 (Liquidity Squeeze Focus)
+
+Usage:
+python script.py SYMBOL # Analyze single symbol
+python script.py SYMBOL --loop # Auto-refresh every 10s
+python script.py --batch [SYMBOLS] # Analyze multiple symbols
+python script.py --api SYMBOL # JSON output for API
+python script.py --help # Show this help
+
+NEW IN v8:
+- Fixed Volume Filter: no reversal when near liquidity (squeeze zone)
+- Fixed HFT6PercentDirection: prioritizes close liquidity (<1%)
+- Empty Book Trap detector: overrides when order book is empty but liq close
+- Low Cap Sniper Mode: activated when volume < 100,000, forces bias to liquidity direction
+- Overbought Distribution Trap: prevents LONG traps in overbought conditions with low volume
+- Oversold Squeeze Trap: prevents SHORT traps in oversold conditions
+- Squeeze Continuation Detector: catches short squeeze continuation when price keeps rising despite selling pressure
+""")
+        else:
+            main()
+    else:
+        main()
