@@ -421,7 +421,7 @@ class OversoldSqueezeTrap:
 
 class EmptyBookTrapDetector:
     @staticmethod
-    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float) -> Dict:
+    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float, change_5m: float) -> Dict:
         # Jika short liq sudah sangat dekat (<0.5%), squeeze sudah habis → jangan override LONG
         if short_dist < 0.5:
             return {"override": False}
@@ -429,6 +429,9 @@ class EmptyBookTrapDetector:
         # Jika down energy 0 (no bids) dan short liq dekat, tetapi long liq lebih dekat → jangan LONG
         if down_energy < 0.1 and short_dist < 2.0:
             if long_dist < short_dist:
+                return {"override": False}
+            # Jangan override LONG jika harga sedang free fall
+            if change_5m < -0.5:
                 return {"override": False}
             return {
                 "override": True,
@@ -443,6 +446,9 @@ class EmptyBookTrapDetector:
                 return {"override": False}
             # Juga cek apakah long liq exhausted
             if long_dist < 0.5:
+                return {"override": False}
+            # Jangan override SHORT jika harga sedang rally naik
+            if change_5m > 0.5:
                 return {"override": False}
             return {
                 "override": True,
@@ -459,9 +465,10 @@ class ExhaustedLiquidityReversal:
     Priority -1060 (between MasterSqueeze -1100 and StrictLiquidity -1050)
     """
     @staticmethod
-    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float) -> Dict:
+    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float, change_5m: float) -> Dict:
         # Short liq sangat kecil (<0.5%) dan overbought (RSI>70) dan volume rendah -> reversal ke SHORT
-        if short_dist < 0.5 and rsi6 > 70 and volume_ratio < 1.0:
+        # Hanya jika tidak sedang rally naik (change_5m < 0.5)
+        if short_dist < 0.5 and rsi6 > 70 and volume_ratio < 1.0 and change_5m < 0.5:
             return {
                 "override": True,
                 "bias": "SHORT",
@@ -469,7 +476,8 @@ class ExhaustedLiquidityReversal:
                 "priority": -1060
             }
         # Mirror untuk long liq exhausted dengan oversold
-        if long_dist < 0.5 and rsi6 < 30 and volume_ratio < 1.0:
+        # Hanya jika tidak sedang free fall (change_5m > -0.5)
+        if long_dist < 0.5 and rsi6 < 30 and volume_ratio < 1.0 and change_5m > -0.5:
             return {
                 "override": True,
                 "bias": "LONG",
@@ -486,9 +494,10 @@ class NearExhaustedLiquidityReversal:
     Priority -1055 (between ExhaustedLiquidityReversal -1060 and StrictLiquidityProximity -1050)
     """
     @staticmethod
-    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float) -> Dict:
+    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float, change_5m: float) -> Dict:
         # Short liq mendekati habis (<1.5%) dan overbought (RSI>70) -> reversal ke SHORT
-        if short_dist < 1.5 and rsi6 > 70 and volume_ratio < 1.0:
+        # Hanya jika tidak sedang rally naik (change_5m < 0.5)
+        if short_dist < 1.5 and rsi6 > 70 and volume_ratio < 1.0 and change_5m < 0.5:
             return {
                 "override": True,
                 "bias": "SHORT",
@@ -496,7 +505,8 @@ class NearExhaustedLiquidityReversal:
                 "priority": -1055
             }
         # Long liq mendekati habis (<1.5%) dan oversold (RSI<30) -> reversal ke LONG
-        if long_dist < 1.5 and rsi6 < 30 and volume_ratio < 1.0:
+        # Hanya jika tidak sedang free fall (change_5m > -0.5)
+        if long_dist < 1.5 and rsi6 < 30 and volume_ratio < 1.0 and change_5m > -0.5:
             return {
                 "override": True,
                 "bias": "LONG",
@@ -2310,7 +2320,7 @@ class BinanceAnalyzer:
                     algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}
                     hft_6pct = {"bias": "NEUTRAL", "reason": ""}
                 else:
-                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"])
+                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"], change_5m)
                     if empty_book["override"]:
                         final_bias = empty_book["bias"]
                         final_reason = empty_book["reason"]
@@ -2364,7 +2374,7 @@ class BinanceAnalyzer:
                         else:
                             # 1.5. EXHAUSTED LIQUIDITY REVERSAL (Priority -1060)
                             exhausted_liquidity = ExhaustedLiquidityReversal.detect(
-                                liq["short_dist"], liq["long_dist"], rsi6, volume_ratio
+                                liq["short_dist"], liq["long_dist"], rsi6, volume_ratio, change_5m
                             )
                             if exhausted_liquidity["override"]:
                                 final_bias = exhausted_liquidity["bias"]
@@ -2376,7 +2386,7 @@ class BinanceAnalyzer:
                             else:
                                 # 1.6. NEAR EXHAUSTED LIQUIDITY REVERSAL (Priority -1055)
                                 near_exhausted = NearExhaustedLiquidityReversal.detect(
-                                    liq["short_dist"], liq["long_dist"], rsi6, volume_ratio
+                                    liq["short_dist"], liq["long_dist"], rsi6, volume_ratio, change_5m
                                 )
                                 if near_exhausted["override"]:
                                     final_bias = near_exhausted["bias"]
