@@ -478,6 +478,33 @@ class ExhaustedLiquidityReversal:
             }
         return {"override": False}
 
+
+class NearExhaustedLiquidityReversal:
+    """
+    🔥 DETECTS WHEN LIQUIDITY TARGET IS NEARLY EXHAUSTED (<1.5%) AND MARKET OVERBOUGHT/OVERSOLD
+    Overrides strict liquidity to prevent forced LONG when short liq is almost gone.
+    Priority -1055 (between ExhaustedLiquidityReversal -1060 and StrictLiquidityProximity -1050)
+    """
+    @staticmethod
+    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float) -> Dict:
+        # Short liq mendekati habis (<1.5%) dan overbought (RSI>70) -> reversal ke SHORT
+        if short_dist < 1.5 and rsi6 > 70 and volume_ratio < 1.0:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Near exhausted liquidity reversal: short liq {short_dist:.2f}% sudah mendekati habis, RSI {rsi6:.1f} overbought → HFT akan ambil long stop setelah sapu short",
+                "priority": -1055
+            }
+        # Long liq mendekati habis (<1.5%) dan oversold (RSI<30) -> reversal ke LONG
+        if long_dist < 1.5 and rsi6 < 30 and volume_ratio < 1.0:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Near exhausted liquidity reversal: long liq {long_dist:.2f}% sudah mendekati habis, RSI {rsi6:.1f} oversold → HFT akan ambil short stop setelah sapu long",
+                "priority": -1055
+            }
+        return {"override": False}
+
 # ================= NEW: SARAN LOGIC FROM LECTURER (LIQUIDITY MAGNET + OFI ABSORPTION + VELOCITY DECAY) =================
 class LiquidityMagnetContinuation:
     """
@@ -2307,12 +2334,14 @@ class BinanceAnalyzer:
                         pump_exhaust = {"override": False}
                         liq_magnet = {"override": False}          # <-- TAMBAHKAN untuk fix UnboundLocalError
                         exhausted_liquidity = {"override": False}  # <-- For ExhaustedLiquidityReversal
+                        near_exhausted = {"override": False}       # <-- For NearExhaustedLiquidityReversal
 
                         # ========== HIGH PRIORITY OVERRIDES (with priority order) ==========
                         # Priority ladder (highest to lowest):
                         # -1100: MasterSqueezeRule (GOLDEN RULE)
                         # -1075: LiquidityMagnetOverride (NEW: LIQ MAGNET OVERRIDE FOR LOW VOLUME SQUEEZE)
                         # -1060: ExhaustedLiquidityReversal (NEW: REVERSAL WHEN LIQ EXHAUSTED + OVERBOUGHT/OVERSOLD)
+                        # -1055: NearExhaustedLiquidityReversal (NEW: REVERSAL WHEN LIQ NEAR-EXHAUSTED <1.5% + OVERBOUGHT/OVERSOLD)
                         # -1050: StrictLiquidityProximity
                         # -1000: LiquidityMagnetContinuation (LIQ MAGNET LAYER)
                         # -950: OFIAbsorptionSqueeze (ABSORPTION/FAKE OFI LAYER)
@@ -2345,158 +2374,170 @@ class BinanceAnalyzer:
                                 priority = exhausted_liquidity["priority"]
                                 prob_engine.add(exhausted_liquidity["bias"], 9.6)
                             else:
-                                # 1.6. STRICT LIQUIDITY PROXIMITY (Priority -1050)
-                                strict_liq = LiquidityProximityStrict.detect(
-                                    liq["short_dist"], liq["long_dist"], volume_ratio
+                                # 1.6. NEAR EXHAUSTED LIQUIDITY REVERSAL (Priority -1055)
+                                near_exhausted = NearExhaustedLiquidityReversal.detect(
+                                    liq["short_dist"], liq["long_dist"], rsi6_5m, volume_ratio
                                 )
-                                if strict_liq["override"]:
-                                    final_bias = strict_liq["bias"]
-                                    final_reason = strict_liq["reason"]
+                                if near_exhausted["override"]:
+                                    final_bias = near_exhausted["bias"]
+                                    final_reason = near_exhausted["reason"]
                                     final_confidence = "ABSOLUTE"
-                                    final_phase = "STRICT_LIQUIDITY"
-                                    priority = strict_liq["priority"]
-                                    prob_engine.add(strict_liq["bias"], 9.5)
+                                    final_phase = "NEAR_EXHAUSTED_LIQUIDITY_REVERSAL"
+                                    priority = near_exhausted["priority"]
+                                    prob_engine.add(near_exhausted["bias"], 9.7)
                                 else:
-                                    # 1.7. LIQUIDITY MAGNET OVERRIDE (Priority -1075)
-                                    # NEW: Force direction based on liquidity magnet when close (<3%) and low volume (<0.7x)
-                                    # Threshold diperluas dari 2.5%/0.5x menjadi 3%/0.7x untuk menangkap lebih banyak squeeze plays
-                                    # Case studies: NOMUSDT (+8%), ARIAUSDT, BASUSDT (+8%)
-                                    liq_magnet_override = LiquidityMagnetOverride.detect(
-                                        liq["short_dist"], liq["long_dist"], volume_ratio,
-                                        rsi6_5m, change_5m
+                                    # 1.7. STRICT LIQUIDITY PROXIMITY (Priority -1050)
+                                    strict_liq = LiquidityProximityStrict.detect(
+                                        liq["short_dist"], liq["long_dist"], volume_ratio
                                     )
-                                    if liq_magnet_override["override"]:
-                                        final_bias = liq_magnet_override["bias"]
-                                        final_reason = liq_magnet_override["reason"]
+                                    if strict_liq["override"]:
+                                        final_bias = strict_liq["bias"]
+                                        final_reason = strict_liq["reason"]
                                         final_confidence = "ABSOLUTE"
-                                        final_phase = "LIQUIDITY_MAGNET_OVERRIDE"
-                                        priority = liq_magnet_override["priority"]
-                                        prob_engine.add(liq_magnet_override["bias"], 9.8)  # weight sangat tinggi
+                                        final_phase = "STRICT_LIQUIDITY"
+                                        priority = strict_liq["priority"]
+                                        prob_engine.add(strict_liq["bias"], 9.5)
                                     else:
-                                        # 2. LIQUIDITY MAGNET CONTINUATION (Priority -1000)
-                                        liq_magnet = LiquidityMagnetContinuation.detect(
-                                            liq["short_dist"], liq["long_dist"], change_5m,
-                                            up_energy, down_energy, volume_ratio
+                                        # 1.7. LIQUIDITY MAGNET OVERRIDE (Priority -1075)
+                                        # NEW: Force direction based on liquidity magnet when close (<3%) and low volume (<0.7x)
+                                        # Threshold diperluas dari 2.5%/0.5x menjadi 3%/0.7x untuk menangkap lebih banyak squeeze plays
+                                        # Case studies: NOMUSDT (+8%), ARIAUSDT, BASUSDT (+8%)
+                                        liq_magnet_override = LiquidityMagnetOverride.detect(
+                                            liq["short_dist"], liq["long_dist"], volume_ratio,
+                                            rsi6_5m, change_5m
                                         )
-                                if liq_magnet["override"]:
-                                    final_bias = liq_magnet["bias"]
-                                    final_reason = liq_magnet["reason"]
-                                    final_confidence = "ABSOLUTE"
-                                    final_phase = "LIQUIDITY_MAGNET_CONTINUATION"
-                                    priority = liq_magnet["priority"]
-                                    prob_engine.add(liq_magnet["bias"], 9.0)
-                                else:
-                                    # 3. OFI ABSORPTION SQUEEZE (Priority -950)
-                                    ofi_absorption = OFIAbsorptionSqueeze.detect(
-                                        ofi["bias"], ofi["strength"], change_5m,
-                                        liq["short_dist"], liq["long_dist"]
-                                    )
-                                    if ofi_absorption["override"]:
-                                        final_bias = ofi_absorption["bias"]
-                                        final_reason = ofi_absorption["reason"]
-                                        final_confidence = "ABSOLUTE"
-                                        final_phase = "OFI_ABSORPTION_SQUEEZE"
-                                        priority = ofi_absorption["priority"]
-                                        prob_engine.add(ofi_absorption["bias"], 8.5)
-                                    else:
-                                        # 4. VELOCITY DECAY REVERSAL (Priority -900)
-                                        velocity_decay = VelocityDecayReversal.detect(
-                                            change_5m, change_30s,
-                                            liq["short_dist"], liq["long_dist"]
-                                        )
-                                        if velocity_decay["override"]:
-                                            final_bias = velocity_decay["bias"]
-                                            final_reason = velocity_decay["reason"]
+                                        if liq_magnet_override["override"]:
+                                            final_bias = liq_magnet_override["bias"]
+                                            final_reason = liq_magnet_override["reason"]
                                             final_confidence = "ABSOLUTE"
-                                            final_phase = "VELOCITY_DECAY_REVERSAL"
-                                            priority = velocity_decay["priority"]
-                                            prob_engine.add(velocity_decay["bias"], 8.0)
+                                            final_phase = "LIQUIDITY_MAGNET_OVERRIDE"
+                                            priority = liq_magnet_override["priority"]
+                                            prob_engine.add(liq_magnet_override["bias"], 9.8)  # weight sangat tinggi
                                         else:
-                                            # 5. EMPTY BOOK MOMENTUM (Priority -850)
-                                            empty_book_mom = EmptyBookMomentum.detect(
-                                                down_energy, up_energy, change_5m,
-                                                liq["short_dist"], liq["long_dist"]
+                                            # 2. LIQUIDITY MAGNET CONTINUATION (Priority -1000)
+                                            liq_magnet = LiquidityMagnetContinuation.detect(
+                                                liq["short_dist"], liq["long_dist"], change_5m,
+                                                up_energy, down_energy, volume_ratio
                                             )
-                                            if empty_book_mom["override"]:
-                                                final_bias = empty_book_mom["bias"]
-                                                final_reason = empty_book_mom["reason"]
+                                            if liq_magnet["override"]:
+                                                final_bias = liq_magnet["bias"]
+                                                final_reason = liq_magnet["reason"]
                                                 final_confidence = "ABSOLUTE"
-                                                final_phase = "EMPTY_BOOK_MOMENTUM"
-                                                priority = empty_book_mom["priority"]
-                                                prob_engine.add(empty_book_mom["bias"], 7.5)
+                                                final_phase = "LIQUIDITY_MAGNET_CONTINUATION"
+                                                priority = liq_magnet["priority"]
+                                                prob_engine.add(liq_magnet["bias"], 9.0)
                                             else:
-                                                # 6. Squeeze Continuation Detector (existing, Priority -265)
-                                                squeeze_cont = SqueezeContinuationDetector.detect(
-                                                    rsi6_5m, change_5m, volume_ratio,
-                                                    liq["short_dist"], up_energy, down_energy,
-                                                    ofi["bias"], ofi["strength"], bid_slope, ask_slope
+                                                # 3. OFI ABSORPTION SQUEEZE (Priority -950)
+                                                ofi_absorption = OFIAbsorptionSqueeze.detect(
+                                                    ofi["bias"], ofi["strength"], change_5m,
+                                                    liq["short_dist"], liq["long_dist"]
                                                 )
-                                                if squeeze_cont["override"]:
-                                                    final_bias = squeeze_cont["bias"]
-                                                    final_reason = squeeze_cont["reason"]
+                                                if ofi_absorption["override"]:
+                                                    final_bias = ofi_absorption["bias"]
+                                                    final_reason = ofi_absorption["reason"]
                                                     final_confidence = "ABSOLUTE"
-                                                    final_phase = "SQUEEZE_CONTINUATION"
-                                                    priority = squeeze_cont["priority"]
-                                                    prob_engine.add(squeeze_cont["bias"], 5.0)
+                                                    final_phase = "OFI_ABSORPTION_SQUEEZE"
+                                                    priority = ofi_absorption["priority"]
+                                                    prob_engine.add(ofi_absorption["bias"], 8.5)
                                                 else:
-                                                    # 6.5. FLUSH EXHAUSTION REVERSAL (Priority -250)
-                                                    flush_exhaust = FlushExhaustionReversal.detect(
-                                                        change_5m, rsi6, volume_ratio,
-                                                        down_energy, liq["long_dist"]
+                                                    # 4. VELOCITY DECAY REVERSAL (Priority -900)
+                                                    velocity_decay = VelocityDecayReversal.detect(
+                                                        change_5m, change_30s,
+                                                        liq["short_dist"], liq["long_dist"]
                                                     )
-                                                    if flush_exhaust["override"]:
-                                                        final_bias = flush_exhaust["bias"]
-                                                        final_reason = flush_exhaust["reason"]
+                                                    if velocity_decay["override"]:
+                                                        final_bias = velocity_decay["bias"]
+                                                        final_reason = velocity_decay["reason"]
                                                         final_confidence = "ABSOLUTE"
-                                                        final_phase = "FLUSH_EXHAUSTION"
-                                                        priority = flush_exhaust["priority"]
-                                                        prob_engine.add(flush_exhaust["bias"], 4.0)
+                                                        final_phase = "VELOCITY_DECAY_REVERSAL"
+                                                        priority = velocity_decay["priority"]
+                                                        prob_engine.add(velocity_decay["bias"], 8.0)
                                                     else:
-                                                        # 7. Cascade Dump Detector
-                                                        cascade = CascadeDumpDetector.detect(change_5m, liq["short_dist"], down_energy, volume_ratio)
-                                                        if cascade["override"]:
-                                                            final_bias = cascade["bias"]
-                                                            final_reason = cascade["reason"]
+                                                        # 5. EMPTY BOOK MOMENTUM (Priority -850)
+                                                        empty_book_mom = EmptyBookMomentum.detect(
+                                                            down_energy, up_energy, change_5m,
+                                                            liq["short_dist"], liq["long_dist"]
+                                                        )
+                                                        if empty_book_mom["override"]:
+                                                            final_bias = empty_book_mom["bias"]
+                                                            final_reason = empty_book_mom["reason"]
                                                             final_confidence = "ABSOLUTE"
-                                                            final_phase = "CASCADE_DUMP"
-                                                            priority = cascade["priority"]
-                                                            prob_engine.add(cascade["bias"], 5.0)
+                                                            final_phase = "EMPTY_BOOK_MOMENTUM"
+                                                            priority = empty_book_mom["priority"]
+                                                            prob_engine.add(empty_book_mom["bias"], 7.5)
                                                         else:
-                                                            # 8. Low Volume Continuation
-                                                            low_vol_cont = LowVolumeContinuation.detect(volume_ratio, obv_trend, price, ma25, ma99, down_energy)
-                                                            if low_vol_cont["override"]:
-                                                                final_bias = low_vol_cont["bias"]
-                                                                final_reason = low_vol_cont["reason"]
+                                                            # 6. Squeeze Continuation Detector (existing, Priority -265)
+                                                            squeeze_cont = SqueezeContinuationDetector.detect(
+                                                                rsi6_5m, change_5m, volume_ratio,
+                                                                liq["short_dist"], up_energy, down_energy,
+                                                                ofi["bias"], ofi["strength"], bid_slope, ask_slope
+                                                            )
+                                                            if squeeze_cont["override"]:
+                                                                final_bias = squeeze_cont["bias"]
+                                                                final_reason = squeeze_cont["reason"]
                                                                 final_confidence = "ABSOLUTE"
-                                                                final_phase = "LOW_VOL_CONT"
-                                                                priority = low_vol_cont["priority"]
-                                                                prob_engine.add(low_vol_cont["bias"], 4.0)
+                                                                final_phase = "SQUEEZE_CONTINUATION"
+                                                                priority = squeeze_cont["priority"]
+                                                                prob_engine.add(squeeze_cont["bias"], 5.0)
                                                             else:
-                                                                # 9. Fake Bounce Trap
-                                                                fake_bounce = FakeBounceTrap.detect(
-                                                                    rsi6, change_5m, volume_ratio,
-                                                                    liq["short_dist"], liq["long_dist"],
-                                                                    up_energy, down_energy,
-                                                                    ofi["bias"], ofi["strength"]
+                                                                # 6.5. FLUSH EXHAUSTION REVERSAL (Priority -250)
+                                                                flush_exhaust = FlushExhaustionReversal.detect(
+                                                                    change_5m, rsi6, volume_ratio,
+                                                                    down_energy, liq["long_dist"]
                                                                 )
-                                                                if fake_bounce["override"]:
-                                                                    final_bias = fake_bounce["bias"]
-                                                                    final_reason = fake_bounce["reason"]
+                                                                if flush_exhaust["override"]:
+                                                                    final_bias = flush_exhaust["bias"]
+                                                                    final_reason = flush_exhaust["reason"]
                                                                     final_confidence = "ABSOLUTE"
-                                                                    final_phase = "FAKE_BOUNCE"
-                                                                    priority = fake_bounce["priority"]
-                                                                    prob_engine.add(fake_bounce["bias"], 4.0)
+                                                                    final_phase = "FLUSH_EXHAUSTION"
+                                                                    priority = flush_exhaust["priority"]
+                                                                    prob_engine.add(flush_exhaust["bias"], 4.0)
                                                                 else:
-                                                                    # Continue with other overrides as before
-                                                                    flush = LiquidityFlushConfirmation.detect(liq["short_dist"], liq["long_dist"], agg)
-                                                            if flush["wait"]:
-                                                                return self._build_result(price, rsi6, rsi14, stoch_k, stoch_d, obv_trend, obv_value,
-                                                                      volume_ratio, change_5m, liq, up_energy, down_energy,
-                                                                      agg, flow, "WAIT", "ABSOLUTE", flush["reason"],
-                                                                      "FLUSH_CONFIRMATION", -255, ofi, iceberg, funding_trap, liq_heat,
-                                                                      cross_lead, None, funding_rate, latest_volume, volume_ma10, rsi6_5m)
+                                                                    # 7. Cascade Dump Detector
+                                                                    cascade = CascadeDumpDetector.detect(change_5m, liq["short_dist"], down_energy, volume_ratio)
+                                                                    if cascade["override"]:
+                                                                        final_bias = cascade["bias"]
+                                                                        final_reason = cascade["reason"]
+                                                                        final_confidence = "ABSOLUTE"
+                                                                        final_phase = "CASCADE_DUMP"
+                                                                        priority = cascade["priority"]
+                                                                        prob_engine.add(cascade["bias"], 5.0)
+                                                                    else:
+                                                                        # 8. Low Volume Continuation
+                                                                        low_vol_cont = LowVolumeContinuation.detect(volume_ratio, obv_trend, price, ma25, ma99, down_energy)
+                                                                        if low_vol_cont["override"]:
+                                                                            final_bias = low_vol_cont["bias"]
+                                                                            final_reason = low_vol_cont["reason"]
+                                                                            final_confidence = "ABSOLUTE"
+                                                                            final_phase = "LOW_VOL_CONT"
+                                                                            priority = low_vol_cont["priority"]
+                                                                            prob_engine.add(low_vol_cont["bias"], 4.0)
+                                                                        else:
+                                                                            # 9. Fake Bounce Trap
+                                                                            fake_bounce = FakeBounceTrap.detect(
+                                                                                rsi6, change_5m, volume_ratio,
+                                                                                liq["short_dist"], liq["long_dist"],
+                                                                                up_energy, down_energy,
+                                                                                ofi["bias"], ofi["strength"]
+                                                                            )
+                                                                            if fake_bounce["override"]:
+                                                                                final_bias = fake_bounce["bias"]
+                                                                                final_reason = fake_bounce["reason"]
+                                                                                final_confidence = "ABSOLUTE"
+                                                                                final_phase = "FAKE_BOUNCE"
+                                                                                priority = fake_bounce["priority"]
+                                                                                prob_engine.add(fake_bounce["bias"], 4.0)
+                                                                            else:
+                                                                                # Continue with other overrides as before
+                                                                                flush = LiquidityFlushConfirmation.detect(liq["short_dist"], liq["long_dist"], agg)
+                                                                                if flush["wait"]:
+                                                                                    return self._build_result(price, rsi6, rsi14, stoch_k, stoch_d, obv_trend, obv_value,
+                                                                                          volume_ratio, change_5m, liq, up_energy, down_energy,
+                                                                                          agg, flow, "WAIT", "ABSOLUTE", flush["reason"],
+                                                                                          "FLUSH_CONFIRMATION", -255, ofi, iceberg, funding_trap, liq_heat,
+                                                                                          cross_lead, None, funding_rate, latest_volume, volume_ma10, rsi6_5m)
 
-                                                            dead_market = DeadMarketProximityRule.detect(agg, flow, liq["short_dist"], liq["long_dist"],
+                                                                                dead_market = DeadMarketProximityRule.detect(agg, flow, liq["short_dist"], liq["long_dist"],
                                                                                      up_energy, down_energy)
                                         if dead_market["override"]:
                                             final_bias = dead_market["bias"]
