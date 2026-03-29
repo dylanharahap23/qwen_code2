@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-🔥 BINANCE LIQUIDATION HUNTER - ULTIMATE EDITION v9 (LECTURER'S SARAN LOGIC)
-🎯 Integrated: Liquidity Magnet Continuation, OFI Absorption Squeeze, Velocity Decay Reversal
-🎯 Priority Ladder: MasterSqueezeRule (-1100) > LiquidityMagnet (-1000) > OFIAbsorption (-950) > VelocityDecay (-900) > EmptyBook (-850)
-🎯 Golden Rule: LONG UNTIL SHORT LIQ SWEPT / SHORT UNTIL LONG LIQ SWEPT
+🔥 BINANCE LIQUIDATION HUNTER - ULTIMATE EDITION v10 (LECTURER'S SARAN INTEGRATED)
+🎯 Integrated: Flow Dominance, Liquidity+OFI Sync, Anti-Reversal Guard
+🎯 Fix Case 1: LONG tapi dump → AntiReversalGuard + LowVolumeContinuation priority naik
+🎯 Fix Case 2: SHORT tapi pump → FlowDominanceRule + LiquidityOFISyncRule
+🎯 Priority Ladder: FlowDominance (-300) > LiquidityOFISync (-290) > AntiReversal (-280) > MasterSqueeze (-1100) > ...
+🎯 Golden Rule: MARKET TIDAK PEDULI RSI, MARKET IKUT: LIQUIDITY + FLOW (OFI) + ENERGY
 """
 
 import requests
@@ -164,6 +166,13 @@ class LowVolumeContinuation:
         return {"override": False}
 
 class AntiReversalGuard:
+    """
+    🚨 ANTI-REVERSAL GUARD (CRITICAL) - PRIORITY NAIK
+    Block LONG reversal saat OBV negative extreme + low volume + oversold
+    Ini fix Case 1: LONG tapi dump (low volume continuation)
+    
+    Priority: -280 (lebih tinggi dari LowVolumeContinuation -230)
+    """
     @staticmethod
     def should_block(obv_trend: str, rsi6: float, volume_ratio: float) -> bool:
         """Block any LONG reversal when conditions are extreme bearish"""
@@ -172,6 +181,154 @@ class AntiReversalGuard:
             volume_ratio < 0.7):
             return True
         return False
+    
+    @staticmethod
+    def detect(obv_trend: str, rsi6: float, volume_ratio: float, 
+               price: float, ma25: float, ma99: float) -> Dict:
+        """
+        Enhanced version with override capability
+        """
+        # CRITICAL: Block LONG when OBV negative extreme + low volume + oversold
+        if (obv_trend == "NEGATIVE_EXTREME" and
+            rsi6 < 20 and
+            volume_ratio < 0.8):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Anti-Reversal Guard: OBV {obv_trend} + RSI {rsi6:.1f} + volume {volume_ratio:.2f}x → low volume continuation, NOT reversal",
+                "priority": -280
+            }
+        return {"override": False}
+
+
+class FlowDominanceRule:
+    """
+    💥 FLOW DOMINANCE RULE - PALING PENTING (ROOT PROBLEM FIX)
+    Market tidak peduli RSI, market ikut: Liquidity + Flow (OFI) + Energy
+    
+    Fix Case 2: SHORT tapi malah pump (OFI LONG + down_energy = 0)
+    
+    Priority: -300 (tertinggi untuk flow-based rules)
+    """
+    @staticmethod
+    def detect(ofi_bias: str, ofi_strength: float, 
+               down_energy: float, up_energy: float,
+               long_dist: float, short_dist: float) -> Dict:
+        """
+        Rule 1: OFI strength > 0.8 → follow OFI direction
+        Rule 2: down_energy = 0 → LONG (no seller = bullish)
+        Rule 3: up_energy = 0 → SHORT (no buyer = bearish)
+        """
+        # FLOW DOMINANCE: OFI strength > 0.8
+        if ofi_strength > 0.8:
+            bias = "LONG" if ofi_bias == "LONG" else "SHORT"
+            return {
+                "override": True,
+                "bias": bias,
+                "reason": f"Flow Dominance: OFI {ofi_bias} strength {ofi_strength:.2f} > 0.8 → follow institutional flow",
+                "priority": -300
+            }
+        
+        # NO SELLER = BULLISH (down_energy = 0)
+        if down_energy == 0 or down_energy < 0.01:
+            # Check if long liq is closer (liquidity magnet)
+            if long_dist < short_dist:
+                return {
+                    "override": True,
+                    "bias": "SHORT",
+                    "reason": f"No Seller + Long Liq Magnet: down_energy={down_energy:.2f} but long liq {long_dist}% closer → target long liq first",
+                    "priority": -300
+                }
+            else:
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": f"No Seller Rule: down_energy={down_energy:.2f} → no resistance to pump, path of least resistance is UP",
+                    "priority": -300
+                }
+        
+        # NO BUYER = BEARISH (up_energy = 0)
+        if up_energy == 0 or up_energy < 0.01:
+            # Check if short liq is closer (liquidity magnet)
+            if short_dist < long_dist:
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": f"No Buyer + Short Liq Magnet: up_energy={up_energy:.2f} but short liq {short_dist}% closer → target short liq first",
+                    "priority": -300
+                }
+            else:
+                return {
+                    "override": True,
+                    "bias": "SHORT",
+                    "reason": f"No Buyer Rule: up_energy={up_energy:.2f} → no resistance to dump, path of least resistance is DOWN",
+                    "priority": -300
+                }
+        
+        return {"override": False}
+
+
+class LiquidityOFISyncRule:
+    """
+    🎯 LIQUIDITY + OFI SYNC RULE
+    Jangan SHORT jika Long Liq lebih dekat + ada buy pressure (OFI LONG)
+    Jangan LONG jika Short Liq lebih dekat + ada sell pressure (OFI SHORT)
+    
+    Fix Case 2: EmptyBookTrap SHORT padahal OFI LONG + long liq dekat
+    
+    Priority: -290 (high priority sync check)
+    """
+    @staticmethod
+    def detect(long_dist: float, short_dist: float,
+               ofi_bias: str, ofi_strength: float,
+               down_energy: float, up_energy: float) -> Dict:
+        """
+        Block SHORT when long liq closer + OFI LONG
+        Block LONG when short liq closer + OFI SHORT
+        """
+        # BLOCK SHORT: Long liq lebih dekat + OFI LONG
+        if (long_dist < short_dist and 
+            long_dist < 2.0 and
+            ofi_bias == "LONG" and 
+            ofi_strength > 0.5):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Liquidity+OFI Sync: Long liq {long_dist}% < Short liq {short_dist}% + OFI LONG {ofi_strength:.2f} → liquidity magnet + flow aligned LONG",
+                "priority": -290
+            }
+        
+        # BLOCK LONG: Short liq lebih dekat + OFI SHORT
+        if (short_dist < long_dist and
+            short_dist < 2.0 and
+            ofi_bias == "SHORT" and
+            ofi_strength > 0.5):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Liquidity+OFI Sync: Short liq {short_dist}% < Long liq {long_dist}% + OFI SHORT {ofi_strength:.2f} → liquidity magnet + flow aligned SHORT",
+                "priority": -290
+            }
+        
+        # EMPTY BOOK BULLISH: down_energy = 0 + OFI LONG
+        if (down_energy == 0 or down_energy < 0.01) and ofi_bias == "LONG" and ofi_strength > 0.7:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Empty Book Bullish: down_energy={down_energy:.2f} (no seller) + OFI LONG {ofi_strength:.2f} → squeeze fuel buildup",
+                "priority": -290
+            }
+        
+        # EMPTY BOOK BEARISH: up_energy = 0 + OFI SHORT
+        if (up_energy == 0 or up_energy < 0.01) and ofi_bias == "SHORT" and ofi_strength > 0.7:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Empty Book Bearish: up_energy={up_energy:.2f} (no buyer) + OFI SHORT {ofi_strength:.2f} → dump fuel buildup",
+                "priority": -290
+            }
+        
+        return {"override": False}
 
 class CascadeDumpDetector:
     @staticmethod
