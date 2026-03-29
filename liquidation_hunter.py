@@ -578,35 +578,42 @@ class OversoldSqueezeTrap:
 
 class EmptyBookTrapDetector:
     @staticmethod
-    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float) -> Dict:
-        # Jika short liq sudah sangat dekat (<0.5%), squeeze sudah habis → jangan override LONG
-        if short_dist < 0.5:
-            return {"override": False}
+    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float, 
+               ofi_bias: str, ofi_strength: float) -> Dict:
+        """
+        🚨 FIX 1: Empty Book Trap dengan OFI Confirmation
+        - Jika down_energy = 0 (No Bid) TAPI OFI tidak LONG kuat → HARGA JATUH (SHORT)
+        - Jika up_energy = 0 (No Ask) TAPI OFI tidak SHORT kuat → HARGA NAIK (LONG)
+        - Binance algo akan biarkan harga jatuh kalau tidak ada yang nangkep
+        Priority: -1000 (naik drastis untuk empty book scenarios)
+        """
+        # FIX 1: Jika down_energy = 0 (No Bid) TAPI OFI tidak LONG kuat → HARGA JATUH (SHORT)
+        if down_energy < 0.01 and short_dist < 2.0:
+            if not (ofi_bias == "LONG" and ofi_strength > 0.6):
+                return {
+                    "override": True,
+                    "bias": "SHORT",
+                    "reason": f"Empty Bid Trap: No support ({down_energy:.2f}) + OFI tidak kuat ({ofi_bias}) → Gravity SHORT",
+                    "priority": -1000
+                }
         
-        # Jika down energy 0 (no bids) dan short liq dekat, tetapi long liq lebih dekat → jangan LONG
-        if down_energy < 0.1 and short_dist < 2.0:
-            if long_dist < short_dist:
-                return {"override": False}
-            return {
-                "override": True,
-                "bias": "LONG",
-                "reason": f"Empty Book Trap: No bid support ({down_energy:.2f}) + Short Liq dekat ({short_dist:.2f}%) → Rawan Short Squeeze",
-                "priority": -260
-            }
+        # FIX 2: Jika up_energy = 0 (No Ask) TAPI OFI tidak SHORT kuat → HARGA NAIK (LONG)
+        if up_energy < 0.01 and long_dist < 2.0:
+            if not (ofi_bias == "SHORT" and ofi_strength > 0.6):
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": f"Empty Ask Trap: No resistance ({up_energy:.2f}) + OFI tidak kuat ({ofi_bias}) → Vacuum LONG",
+                    "priority": -1000
+                }
         
-        # Jika up energy 0 (no asks) dan long liq dekat, tetapi short liq lebih dekat → jangan SHORT
-        if up_energy < 0.1 and long_dist < 2.0:
-            if short_dist < long_dist:
-                return {"override": False}
-            # Juga cek apakah long liq exhausted
-            if long_dist < 0.5:
-                return {"override": False}
-            return {
-                "override": True,
-                "bias": "SHORT",
-                "reason": f"Empty Book Trap: No ask resistance ({up_energy:.2f}) + Long Liq dekat ({long_dist:.2f}%) → Rawan Long Squeeze",
-                "priority": -260
-            }
+        # Logic lama hanya valid jika OFI konfirmasi
+        if down_energy < 0.1 and short_dist < 2.0 and ofi_bias == "LONG" and ofi_strength > 0.7:
+             return {"override": True, "bias": "LONG", "reason": "Confirmed Short Squeeze", "priority": -900}
+        
+        if up_energy < 0.1 and long_dist < 2.0 and ofi_bias == "SHORT" and ofi_strength > 0.7:
+             return {"override": True, "bias": "SHORT", "reason": "Confirmed Long Squeeze", "priority": -900}
+        
         return {"override": False}
 
 class ExhaustedLiquidityReversal:
@@ -828,32 +835,31 @@ class MasterSqueezeRule:
     Maka default bias harus: LONG UNTIL SHORT LIQ SWEPT
     
     Priority: -1100 (tertinggi absolut)
+    
+    🚨 FIX: Dynamic Threshold untuk Low Cap
+    - Jika volume rendah, pergerakan 2% sudah signifikan (bukan 5%)
+    - Turunkan threshold untuk koin seperti PLAY/ONO yang bisa squeeze cuma dengan 2%
     """
     @staticmethod
     def detect(short_dist: float, long_dist: float, change_5m: float,
                down_energy: float, up_energy: float, volume_ratio: float) -> Dict:
+        # Dynamic Threshold: Jika volume rendah, pergerakan 2% sudah signifikan
+        move_threshold = 2.0 if volume_ratio < 0.7 else 5.0
+        
         # MASTER LONG RULE
-        if (
-            short_dist < 0.8 and
-            change_5m > 5 and
-            down_energy == 0
-        ):
+        if (short_dist < 1.5 and change_5m > move_threshold and down_energy == 0):
             return {
                 "override": True,
                 "bias": "LONG",
-                "reason": f"MASTER SQUEEZE RULE: Short liq {short_dist:.2f}% terlalu dekat + momentum {change_5m:.1f}% + no seller (down_energy=0) → LONG UNTIL SHORT LIQ SWEPT",
+                "reason": f"MASTER SQUEEZE: Short liq {short_dist}% + No Seller + Low Vol → HFT will sweep",
                 "priority": -1100
             }
-        # MASTER SHORT RULE - mirror
-        if (
-            long_dist < 0.8 and
-            change_5m < -5 and
-            up_energy == 0
-        ):
+        # MASTER SHORT RULE
+        if (long_dist < 1.5 and change_5m < -move_threshold and up_energy == 0):
             return {
                 "override": True,
                 "bias": "SHORT",
-                "reason": f"MASTER SQUEEZE RULE: Long liq {long_dist:.2f}% terlalu dekat + momentum {change_5m:.1f}% + no buyer (up_energy=0) → SHORT UNTIL LONG LIQ SWEPT",
+                "reason": f"MASTER SQUEEZE: Long liq {long_dist}% + No Buyer + Low Vol → HFT will dump",
                 "priority": -1100
             }
         return {"override": False}
@@ -1577,22 +1583,33 @@ class PumpExhaustionTrap:
     🔥 NEW: Detects thin pumps that are likely reversal traps.
     Based on lecturer's feedback: pump with low volume, no sellers (down_energy=0),
     but long liq is closer than short liq → HFT will reverse to grab long liquidations.
-    Priority -216: between ThinOrderBookPump (-217) and EnergyTrap (-217)
+    
+    🚨 CRITICAL FIX: Vacuum Pump vs Exhaustion
+    - Jika down_energy = 0 (No Seller), ini BUKAN exhaustion, ini VACUUM!
+    - Jangan SHORT kalau tidak ada yang jual
+    - Exhaustion valid hanya jika ada resistance (up_energy) tapi harga mentok
+    
+    Priority: -500 untuk real exhaustion, skip jika vacuum
     """
     @staticmethod
     def detect(change_5m: float, volume_ratio: float, down_energy: float,
-               long_liq: float, short_liq: float, rsi6: float) -> Dict:
-        # Pump dengan volume rendah, no sellers, dan long liq lebih dekat dari short liq
-        if (change_5m > 1.0 and
-            volume_ratio < 0.7 and
-            down_energy < 0.01 and
-            long_liq < short_liq and
-            rsi6 < 75):  # tidak overbought ekstrim, tapi sudah naik
+               long_liq: float, short_liq: float, rsi6: float, ofi_bias: str) -> Dict:
+        
+        # CRITICAL FIX: Jika down_energy = 0 (No Seller), ini BUKAN exhaustion, ini VACUUM!
+        # Jangan SHORT kalau tidak ada yang jual
+        if down_energy < 0.01:
+            return {"override": False, "reason": "No Seller detected → Vacuum Pump likely"}
+
+        # Exhaustion valid hanya jika ada resistance (up_energy) tapi harga mentok
+        if (change_5m > 3.0 and
+            volume_ratio < 0.5 and
+            long_liq < short_liq and  # Long liq lebih dekat (bahaya buat long)
+            rsi6 > 70):               # Benar-benar overbought
             return {
                 "override": True,
                 "bias": "SHORT",
-                "reason": f"Pump exhaustion trap: naik {change_5m:.1f}% dengan volume {volume_ratio:.2f}x, down_energy=0 tapi long liq {long_liq}% < short liq {short_liq}% → reversal untuk ambil long liq",
-                "priority": -216   # di antara ThinOrderBookPump (-217) dan EnergyTrap (-217) dll
+                "reason": f"Real Exhaustion: Pump {change_5m}% low vol + Long Liq closer + RSI {rsi6}",
+                "priority": -500
             }
         return {"override": False}
 
@@ -1615,6 +1632,29 @@ class HFTTrapDetector:
                 "priority": -230
             }
         return {"override": False, "priority": 0}
+
+# ================= NEW: WASH TRADE DETECTOR =================
+class WashTradeDetector:
+    """
+    🚨 NEW DETECTOR: HFT Wash Trade Filter
+    Binance_algo sering bikin volume palsu (wash trade) di harga yang sama untuk menipu indikator volume.
+    Jika > 60% trade di harga sama persis → Wash Trade (Fake Volume)
+    
+    Gunakan di analyze(): if WashTradeDetector.detect(trades): final_confidence = "LOW"
+    """
+    @staticmethod
+    def detect(trades: List[Dict]) -> bool:
+        if len(trades) < 10:
+            return False
+        same_price_count = 0
+        last_price = trades[-1].get('p') if trades else None
+        for t in trades[-20:]:
+            if t.get('p') == last_price:
+                same_price_count += 1
+        # Jika > 60% trade di harga sama persis → Wash Trade (Fake Volume)
+        if same_price_count > 12:
+            return True
+        return False
 
 class VolumeConfidenceFilter:
     @staticmethod
@@ -2467,7 +2507,7 @@ class BinanceAnalyzer:
                     algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}
                     hft_6pct = {"bias": "NEUTRAL", "reason": ""}
                 else:
-                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"])
+                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"], ofi["bias"], ofi["strength"])
                     if empty_book["override"]:
                         final_bias = empty_book["bias"]
                         final_reason = empty_book["reason"]
@@ -2881,7 +2921,7 @@ class BinanceAnalyzer:
                                                                                                     else:
                                                                                                         # NEW: PumpExhaustionTrap - detect thin pump reversal traps
                                                                                                         pump_exhaust = PumpExhaustionTrap.detect(change_5m, volume_ratio, down_energy,
-                                                                                                                                                 liq["long_dist"], liq["short_dist"], rsi6)
+                                                                                                                                                 liq["long_dist"], liq["short_dist"], rsi6, ofi["bias"])
                                                                                                         if pump_exhaust["override"]:
                                                                                                             final_bias = pump_exhaust["bias"]
                                                                                                             final_reason = pump_exhaust["reason"]
