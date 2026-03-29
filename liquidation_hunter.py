@@ -2364,7 +2364,7 @@ class BinanceAnalyzer:
                         else:
                             # 1.5. EXHAUSTED LIQUIDITY REVERSAL (Priority -1060)
                             exhausted_liquidity = ExhaustedLiquidityReversal.detect(
-                                liq["short_dist"], liq["long_dist"], rsi6_5m, volume_ratio
+                                liq["short_dist"], liq["long_dist"], rsi6, volume_ratio
                             )
                             if exhausted_liquidity["override"]:
                                 final_bias = exhausted_liquidity["bias"]
@@ -2376,7 +2376,7 @@ class BinanceAnalyzer:
                             else:
                                 # 1.6. NEAR EXHAUSTED LIQUIDITY REVERSAL (Priority -1055)
                                 near_exhausted = NearExhaustedLiquidityReversal.detect(
-                                    liq["short_dist"], liq["long_dist"], rsi6_5m, volume_ratio
+                                    liq["short_dist"], liq["long_dist"], rsi6, volume_ratio
                                 )
                                 if near_exhausted["override"]:
                                     final_bias = near_exhausted["bias"]
