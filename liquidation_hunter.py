@@ -2604,6 +2604,7 @@ class BinanceAnalyzer:
                         liq_magnet = {"override": False}          # <-- TAMBAHKAN untuk fix UnboundLocalError
                         exhausted_liquidity = {"override": False}  # <-- For ExhaustedLiquidityReversal
                         near_exhausted = {"override": False}       # <-- For NearExhaustedLiquidityReversal
+                        liq_magnet_override = {"override": False}  # <-- FIX UnboundLocalError for LiquidityMagnetOverride
 
                         # ========== HIGH PRIORITY OVERRIDES (with priority order) ==========
                         # Priority ladder (highest to lowest):
