@@ -145,6 +145,51 @@ def macd_duel_logic(hist_scaled):
         "pattern": last6
     }
 
+
+# ================= LECTURER'S SARAN LOGIC: MACD DUEL SAFE FILTER =================
+def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq):
+    """
+    Filter pembatas agar MACD duel tidak membalik sinyal ketika sinyal asli sudah sangat kuat dan konsisten.
+    
+    Filters:
+    1. Filter Kekuatan Sinyal Asli - MACD duel hanya boleh REVERSE jika sinyal asli tidak terlalu kuat
+    2. Filter Arah OFI & Algo - Jika OFI, Algo, HFT semuanya sama dan bukan NEUTRAL, maka MACD duel tidak boleh membalik
+    3. Filter MACD Duel dengan Ambang Batas - reverse hanya terjadi jika duel cukup besar (abs > 10)
+    4. Filter Momentum & Likuiditas - Jika harga sudah bergerak cukup besar dan likuiditas target dekat, jangan reverse
+    """
+    if macd_decision["action"] != "REVERSE":
+        return final_bias, macd_decision["action"], "NONE"
+    
+    # Filter 1: kekuatan konsensus sinyal asli
+    strength = 0
+    if algo_type["bias"] == final_bias:
+        strength += 2
+    if hft_6pct["bias"] == final_bias:
+        strength += 2
+    if ofi["bias"] == final_bias:
+        strength += 1
+    if abs(change_5m) > 3:
+        strength += 1
+    
+    if strength > 3:
+        return final_bias, "BLOCKED", f"original_strength={strength}"
+    
+    # Filter 2: triple confirmation (OFI, Algo, HFT semua sama dan bukan NEUTRAL)
+    if ofi["bias"] == algo_type["bias"] == hft_6pct["bias"] != "NEUTRAL":
+        return final_bias, "BLOCKED", "triple_confirmation"
+    
+    # Filter 3: duel terlalu kecil (ambang batas abs(duel) < 10)
+    if abs(macd_decision.get("duel", 0)) < 10:
+        return final_bias, "IGNORED", f"duel_too_small={macd_decision.get('duel', 0)}"
+    
+    # Filter 4: momentum besar & likuiditas dekat
+    if abs(change_5m) > 2.0 and (liq["short_dist"] < 2.0 or liq["long_dist"] < 2.0):
+        return final_bias, "BLOCKED", "momentum_and_liq_proximity"
+    
+    # Lolos semua filter → lakukan reverse
+    new_bias = "SHORT" if final_bias == "LONG" else "LONG"
+    return new_bias, "REVERSE", "passed_all_filters"
+
 # ================= WEBSOCKET CONNECTOR (unchanged) =================
 class BinanceWebSocket:
     """Real-time WebSocket for order book and trades"""
@@ -2920,17 +2965,33 @@ class BinanceAnalyzer:
                                                                                                                 final_phase = "PROBABILISTIC_VOTING"
                                                                                                                 priority = 0
 
-            # ========== MACD DUEL OVERRIDE ==========
+            # ========== MACD DUEL OVERRIDE (WITH LECTURER'S SARAN FILTER) ==========
             if macd_decision["action"] != "NONE":
+                # Apply lecturer's saran filter for REVERSE actions
                 if macd_decision["action"] == "REVERSE":
-                    original = final_bias
-                    final_bias = "SHORT" if final_bias == "LONG" else "LONG"
-                    final_reason += f" | MACD Duel REVERSE ({macd_decision['mode']}): {macd_decision['duel']}"
-                    final_phase = "MACD_DUEL_REVERSE"
+                    new_bias, action, filter_reason = apply_macd_duel_safe(
+                        macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq
+                    )
+                    
+                    if action == "REVERSE":
+                        # Lolos semua filter → lakukan reverse
+                        original = final_bias
+                        final_bias = new_bias
+                        final_reason += f" | MACD Duel REVERSE ({macd_decision['mode']}): {macd_decision['duel']} [PASS]"
+                        final_phase = "MACD_DUEL_REVERSE"
+                        final_confidence = "ABSOLUTE"
+                    elif action == "BLOCKED":
+                        # Reverse diblokir karena sinyal asli terlalu kuat atau kondisi lain
+                        final_reason += f" | MACD Duel REVERSE BLOCKED ({filter_reason})"
+                        final_phase = "MACD_DUEL_BLOCKED"
+                    elif action == "IGNORED":
+                        # Reverse diabaikan karena duel terlalu kecil
+                        final_reason += f" | MACD Duel REVERSE IGNORED ({filter_reason})"
+                        final_phase = "MACD_DUEL_IGNORED"
                 else:  # FOLLOW
                     final_reason += f" | MACD Duel FOLLOW ({macd_decision['mode']}): {macd_decision['duel']}"
                     final_phase = "MACD_DUEL_FOLLOW"
-                final_confidence = "ABSOLUTE"
+                    final_confidence = "ABSOLUTE"
 
             # ========== Anti‑reversal guard ==========
             if AntiReversalGuard.should_block(obv_trend, rsi6, volume_ratio):
