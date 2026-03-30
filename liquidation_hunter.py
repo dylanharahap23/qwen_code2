@@ -88,6 +88,63 @@ def safe_div(a, b, default=1.0):
     except:
         return default
 
+# ================= MACD DUEL LOGIC =================
+def calculate_macd(close_prices, fast=12, slow=26, signal=9):
+    def ema(data, period):
+        alpha = 2 / (period + 1)
+        ema_arr = [data[0]]
+        for price in data[1:]:
+            ema_arr.append(alpha * price + (1 - alpha) * ema_arr[-1])
+        return np.array(ema_arr)
+
+    close = np.array(close_prices)
+    fast_ema = ema(close, fast)
+    slow_ema = ema(close, slow)
+    macd = fast_ema - slow_ema
+    signal_line = ema(macd, signal)
+    hist = macd - signal_line
+    return macd, signal_line, hist
+
+def scale_macd(hist):
+    return (hist * 100000).astype(int)
+
+def macd_duel_logic(hist_scaled):
+    """
+    Returns a dict:
+        action: 'REVERSE', 'FOLLOW', or 'NONE'
+        mode: '4vs2' or '2vs4'
+        result: a - b
+        final: last hist value
+        pattern: the 6‑element array
+    """
+    if len(hist_scaled) < 6:
+        return {"action": "NONE"}
+
+    last6 = hist_scaled[-6:]   # index 0 .. 5
+    final = last6[5]           # index 5 = last candle
+
+    if final < 0:
+        a = last6[3]           # baris 4 (index 3)
+        b = last6[1]           # baris 2 (index 1)
+        mode = "4vs2"
+    else:
+        a = last6[1]           # baris 2
+        b = last6[3]           # baris 4
+        mode = "2vs4"
+
+    duel = a - b
+    action = "REVERSE" if duel < 0 else "FOLLOW"
+
+    return {
+        "action": action,
+        "mode": mode,
+        "a": a,
+        "b": b,
+        "duel": duel,
+        "final": final,
+        "pattern": last6
+    }
+
 # ================= WEBSOCKET CONNECTOR (unchanged) =================
 class BinanceWebSocket:
     """Real-time WebSocket for order book and trades"""
@@ -2181,6 +2238,14 @@ class BinanceAnalyzer:
             lows_1m = k1m["lows"]
             volumes_1m = k1m["volumes"]
 
+            # ========== MACD DUEL LOGIC ==========
+            if len(closes_1m) >= 50:
+                macd, signal_line, hist = calculate_macd(closes_1m, 12, 26, 9)
+                hist_scaled = scale_macd(hist)
+                macd_decision = macd_duel_logic(hist_scaled)
+            else:
+                macd_decision = {"action": "NONE"}
+
             latest_volume = volumes_1m[-1] if volumes_1m else 0.0
             if len(volumes_1m) >= 10:
                 volume_ma10 = sum(volumes_1m[-10:]) / 10
@@ -2854,6 +2919,18 @@ class BinanceAnalyzer:
                                                                                                                     final_confidence = "MEDIUM"
                                                                                                                 final_phase = "PROBABILISTIC_VOTING"
                                                                                                                 priority = 0
+
+            # ========== MACD DUEL OVERRIDE ==========
+            if macd_decision["action"] != "NONE":
+                if macd_decision["action"] == "REVERSE":
+                    original = final_bias
+                    final_bias = "SHORT" if final_bias == "LONG" else "LONG"
+                    final_reason += f" | MACD Duel REVERSE ({macd_decision['mode']}): {macd_decision['duel']}"
+                    final_phase = "MACD_DUEL_REVERSE"
+                else:  # FOLLOW
+                    final_reason += f" | MACD Duel FOLLOW ({macd_decision['mode']}): {macd_decision['duel']}"
+                    final_phase = "MACD_DUEL_FOLLOW"
+                final_confidence = "ABSOLUTE"
 
             # ========== Anti‑reversal guard ==========
             if AntiReversalGuard.should_block(obv_trend, rsi6, volume_ratio):
