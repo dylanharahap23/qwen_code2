@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-🔥 BINANCE LIQUIDATION HUNTER - ULTIMATE EDITION v10 (LECTURER'S SARAN INTEGRATED)
-🎯 Integrated: Flow Dominance, Liquidity+OFI Sync, Anti-Reversal Guard
-🎯 Fix Case 1: LONG tapi dump → AntiReversalGuard + LowVolumeContinuation priority naik
-🎯 Fix Case 2: SHORT tapi pump → FlowDominanceRule + LiquidityOFISyncRule
-🎯 Priority Ladder: FlowDominance (-300) > LiquidityOFISync (-290) > AntiReversal (-280) > MasterSqueeze (-1100) > ...
-🎯 Golden Rule: MARKET TIDAK PEDULI RSI, MARKET IKUT: LIQUIDITY + FLOW (OFI) + ENERGY
+🔥 BINANCE LIQUIDATION HUNTER - ULTIMATE EDITION v9 (LECTURER'S SARAN LOGIC)
+🎯 Integrated: Liquidity Magnet Continuation, OFI Absorption Squeeze, Velocity Decay Reversal
+🎯 Priority Ladder: MasterSqueezeRule (-1100) > LiquidityMagnet (-1000) > OFIAbsorption (-950) > VelocityDecay (-900) > EmptyBook (-850)
+🎯 Golden Rule: LONG UNTIL SHORT LIQ SWEPT / SHORT UNTIL LONG LIQ SWEPT
 """
 
 import requests
@@ -166,13 +164,6 @@ class LowVolumeContinuation:
         return {"override": False}
 
 class AntiReversalGuard:
-    """
-    🚨 ANTI-REVERSAL GUARD (CRITICAL) - PRIORITY NAIK
-    Block LONG reversal saat OBV negative extreme + low volume + oversold
-    Ini fix Case 1: LONG tapi dump (low volume continuation)
-    
-    Priority: -280 (lebih tinggi dari LowVolumeContinuation -230)
-    """
     @staticmethod
     def should_block(obv_trend: str, rsi6: float, volume_ratio: float) -> bool:
         """Block any LONG reversal when conditions are extreme bearish"""
@@ -181,154 +172,6 @@ class AntiReversalGuard:
             volume_ratio < 0.7):
             return True
         return False
-    
-    @staticmethod
-    def detect(obv_trend: str, rsi6: float, volume_ratio: float, 
-               price: float, ma25: float, ma99: float) -> Dict:
-        """
-        Enhanced version with override capability
-        """
-        # CRITICAL: Block LONG when OBV negative extreme + low volume + oversold
-        if (obv_trend == "NEGATIVE_EXTREME" and
-            rsi6 < 20 and
-            volume_ratio < 0.8):
-            return {
-                "override": True,
-                "bias": "SHORT",
-                "reason": f"Anti-Reversal Guard: OBV {obv_trend} + RSI {rsi6:.1f} + volume {volume_ratio:.2f}x → low volume continuation, NOT reversal",
-                "priority": -280
-            }
-        return {"override": False}
-
-
-class FlowDominanceRule:
-    """
-    💥 FLOW DOMINANCE RULE - PALING PENTING (ROOT PROBLEM FIX)
-    Market tidak peduli RSI, market ikut: Liquidity + Flow (OFI) + Energy
-    
-    Fix Case 2: SHORT tapi malah pump (OFI LONG + down_energy = 0)
-    
-    Priority: -300 (tertinggi untuk flow-based rules)
-    """
-    @staticmethod
-    def detect(ofi_bias: str, ofi_strength: float, 
-               down_energy: float, up_energy: float,
-               long_dist: float, short_dist: float) -> Dict:
-        """
-        Rule 1: OFI strength > 0.8 → follow OFI direction
-        Rule 2: down_energy = 0 → LONG (no seller = bullish)
-        Rule 3: up_energy = 0 → SHORT (no buyer = bearish)
-        """
-        # FLOW DOMINANCE: OFI strength > 0.8
-        if ofi_strength > 0.8:
-            bias = "LONG" if ofi_bias == "LONG" else "SHORT"
-            return {
-                "override": True,
-                "bias": bias,
-                "reason": f"Flow Dominance: OFI {ofi_bias} strength {ofi_strength:.2f} > 0.8 → follow institutional flow",
-                "priority": -300
-            }
-        
-        # NO SELLER = BULLISH (down_energy = 0)
-        if down_energy == 0 or down_energy < 0.01:
-            # Check if long liq is closer (liquidity magnet)
-            if long_dist < short_dist:
-                return {
-                    "override": True,
-                    "bias": "SHORT",
-                    "reason": f"No Seller + Long Liq Magnet: down_energy={down_energy:.2f} but long liq {long_dist}% closer → target long liq first",
-                    "priority": -300
-                }
-            else:
-                return {
-                    "override": True,
-                    "bias": "LONG",
-                    "reason": f"No Seller Rule: down_energy={down_energy:.2f} → no resistance to pump, path of least resistance is UP",
-                    "priority": -300
-                }
-        
-        # NO BUYER = BEARISH (up_energy = 0)
-        if up_energy == 0 or up_energy < 0.01:
-            # Check if short liq is closer (liquidity magnet)
-            if short_dist < long_dist:
-                return {
-                    "override": True,
-                    "bias": "LONG",
-                    "reason": f"No Buyer + Short Liq Magnet: up_energy={up_energy:.2f} but short liq {short_dist}% closer → target short liq first",
-                    "priority": -300
-                }
-            else:
-                return {
-                    "override": True,
-                    "bias": "SHORT",
-                    "reason": f"No Buyer Rule: up_energy={up_energy:.2f} → no resistance to dump, path of least resistance is DOWN",
-                    "priority": -300
-                }
-        
-        return {"override": False}
-
-
-class LiquidityOFISyncRule:
-    """
-    🎯 LIQUIDITY + OFI SYNC RULE
-    Jangan SHORT jika Long Liq lebih dekat + ada buy pressure (OFI LONG)
-    Jangan LONG jika Short Liq lebih dekat + ada sell pressure (OFI SHORT)
-    
-    Fix Case 2: EmptyBookTrap SHORT padahal OFI LONG + long liq dekat
-    
-    Priority: -290 (high priority sync check)
-    """
-    @staticmethod
-    def detect(long_dist: float, short_dist: float,
-               ofi_bias: str, ofi_strength: float,
-               down_energy: float, up_energy: float) -> Dict:
-        """
-        Block SHORT when long liq closer + OFI LONG
-        Block LONG when short liq closer + OFI SHORT
-        """
-        # BLOCK SHORT: Long liq lebih dekat + OFI LONG
-        if (long_dist < short_dist and 
-            long_dist < 2.0 and
-            ofi_bias == "LONG" and 
-            ofi_strength > 0.5):
-            return {
-                "override": True,
-                "bias": "LONG",
-                "reason": f"Liquidity+OFI Sync: Long liq {long_dist}% < Short liq {short_dist}% + OFI LONG {ofi_strength:.2f} → liquidity magnet + flow aligned LONG",
-                "priority": -290
-            }
-        
-        # BLOCK LONG: Short liq lebih dekat + OFI SHORT
-        if (short_dist < long_dist and
-            short_dist < 2.0 and
-            ofi_bias == "SHORT" and
-            ofi_strength > 0.5):
-            return {
-                "override": True,
-                "bias": "SHORT",
-                "reason": f"Liquidity+OFI Sync: Short liq {short_dist}% < Long liq {long_dist}% + OFI SHORT {ofi_strength:.2f} → liquidity magnet + flow aligned SHORT",
-                "priority": -290
-            }
-        
-        # EMPTY BOOK BULLISH: down_energy = 0 + OFI LONG
-        if (down_energy == 0 or down_energy < 0.01) and ofi_bias == "LONG" and ofi_strength > 0.7:
-            return {
-                "override": True,
-                "bias": "LONG",
-                "reason": f"Empty Book Bullish: down_energy={down_energy:.2f} (no seller) + OFI LONG {ofi_strength:.2f} → squeeze fuel buildup",
-                "priority": -290
-            }
-        
-        # EMPTY BOOK BEARISH: up_energy = 0 + OFI SHORT
-        if (up_energy == 0 or up_energy < 0.01) and ofi_bias == "SHORT" and ofi_strength > 0.7:
-            return {
-                "override": True,
-                "bias": "SHORT",
-                "reason": f"Empty Book Bearish: up_energy={up_energy:.2f} (no buyer) + OFI SHORT {ofi_strength:.2f} → dump fuel buildup",
-                "priority": -290
-            }
-        
-        return {"override": False}
 
 class CascadeDumpDetector:
     @staticmethod
@@ -496,74 +339,6 @@ class TimeDecayFilter:
         return new_bias
 
 # ================= NEW DETECTOR FROM MENTOR (Overbought/Oversold Traps) =================
-
-class LiquidityProximityAbsolute:
-    """
-    🔥 RULE PALING SAKTI: Short Liq < 0.5% = LONG WAJIB, tidak bisa di-override
-    Priority -2000 (tertinggi absolut, выше MasterSqueeze -1100)
-    
-    FIX CRITICAL untuk kasus AIAUSDT: Short liq 0.31% tapi bot SHORT
-    """
-    @staticmethod
-    def detect(short_dist: float, long_dist: float, down_energy: float, 
-               ofi_bias: str, ofi_strength: float) -> Dict:
-        
-        # SHORT LIQ SUPER DEKAT (<0.5%) = LONG WAJIB
-        if short_dist < 0.5:
-            # Kecuali OFI SHORT sangat kuat (>0.9) dan ada sell wall
-            if not (ofi_bias == "SHORT" and ofi_strength > 0.9):
-                return {
-                    "override": True,
-                    "bias": "LONG",
-                    "reason": f"LIQUIDITY ABSOLUTE: Short liq {short_dist:.2f}% < 0.5% → HFT WILL SQUEEZE, no override allowed",
-                    "priority": -2000
-                }
-        
-        # LONG LIQ SUPER DEKAT (<0.5%) = SHORT WAJIB
-        if long_dist < 0.5:
-            if not (ofi_bias == "LONG" and ofi_strength > 0.9):
-                return {
-                    "override": True,
-                    "bias": "SHORT",
-                    "reason": f"LIQUIDITY ABSOLUTE: Long liq {long_dist:.2f}% < 0.5% → HFT WILL DUMP, no override allowed",
-                    "priority": -2000
-                }
-        
-        return {"override": False}
-
-
-class SqueezeMomentumConfirmation:
-    """
-    🔥 Confirm squeeze continuation when:
-    - Short liq < 1%
-    - down_energy = 0 (no seller)
-    - OFI LONG or NEUTRAL
-    - Price already moving up
-    
-    Priority -1500 (below LiquidityProximityAbsolute, above MasterSqueeze)
-    """
-    @staticmethod
-    def detect(short_dist: float, down_energy: float, ofi_bias: str, 
-               ofi_strength: float, change_5m: float, rsi6: float) -> Dict:
-        
-        if (short_dist < 1.0 and 
-            down_energy < 0.01 and 
-            change_5m > 0 and
-            not (ofi_bias == "SHORT" and ofi_strength > 0.7)):
-            return {
-                "override": True,
-                "bias": "LONG",
-                "reason": f"Squeeze Momentum: short liq {short_dist:.2f}% + no seller + price up {change_5m:.1f}% → continuation",
-                "priority": -1500
-            }
-        
-        # Mirror for long squeeze
-        if (long_dist < 1.0 if 'long_dist' in locals() else False):
-            pass  # Handled by other detectors
-        
-        return {"override": False}
-
-
 class OverboughtDistributionTrap:
     @staticmethod
     def detect(rsi6: float, short_dist: float, long_dist: float, volume_ratio: float,
@@ -573,13 +348,9 @@ class OverboughtDistributionTrap:
         Mendeteksi perangkap distribusi ketika market overbought namun ada sinyal LONG palsu.
         Priority lebih tinggi dari Empty Book Trap (-261 vs -260).
         
-        FIX CRITICAL: Jangan override SHORT jika short liq < 1% (squeeze zone)
+        NEW: Tidak override jika short liq sangat dekat (<2%) dan lebih dekat dari long liq
         → liquidity mengarah LONG, jangan SHORT.
         """
-        # FIX CRITICAL: Jangan override SHORT jika short liq < 1% (squeeze in progress)
-        if short_dist < 1.0:
-            return {"override": False, "reason": "Short liq too close (<1%), squeeze in progress"}
-        
         # Jika short liq sangat dekat dan lebih dekat dari long liq → liquidity mengarah LONG, jangan SHORT
         if short_dist < 2.0 and short_dist < long_dist:
             return {"override": False}
@@ -650,42 +421,35 @@ class OversoldSqueezeTrap:
 
 class EmptyBookTrapDetector:
     @staticmethod
-    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float, 
-               ofi_bias: str, ofi_strength: float) -> Dict:
-        """
-        🚨 FIX 1: Empty Book Trap dengan OFI Confirmation
-        - Jika down_energy = 0 (No Bid) TAPI OFI tidak LONG kuat → HARGA JATUH (SHORT)
-        - Jika up_energy = 0 (No Ask) TAPI OFI tidak SHORT kuat → HARGA NAIK (LONG)
-        - Binance algo akan biarkan harga jatuh kalau tidak ada yang nangkep
+    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float) -> Dict:
+        # Jika short liq sudah sangat dekat (<0.5%), squeeze sudah habis → jangan override LONG
+        if short_dist < 0.5:
+            return {"override": False}
         
-        FIX CRITICAL: Short liq < 1% = JANGAN SHORT, justru LONG (squeeze fuel)
-        Priority: -950 (below LiquidityProximityAbsolute -2000 and SqueezeMomentum -1500)
-        """
-        # FIX 1: Short liq < 1% = JANGAN SHORT, justru LONG (squeeze fuel)
-        if short_dist < 1.0 and down_energy < 0.1:
+        # Jika down energy 0 (no bids) dan short liq dekat, tetapi long liq lebih dekat → jangan LONG
+        if down_energy < 0.1 and short_dist < 2.0:
+            if long_dist < short_dist:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "LONG",
-                "reason": f"Empty Bid + Short Squeeze: down_energy={down_energy:.2f} (no seller) + short liq {short_dist:.2f}% → squeeze fuel",
-                "priority": -950
+                "reason": f"Empty Book Trap: No bid support ({down_energy:.2f}) + Short Liq dekat ({short_dist:.2f}%) → Rawan Short Squeeze",
+                "priority": -260
             }
         
-        # FIX 2: Long liq < 1% = JANGAN LONG, justru SHORT (dump fuel)
-        if long_dist < 1.0 and up_energy < 0.1:
+        # Jika up energy 0 (no asks) dan long liq dekat, tetapi short liq lebih dekat → jangan SHORT
+        if up_energy < 0.1 and long_dist < 2.0:
+            if short_dist < long_dist:
+                return {"override": False}
+            # Juga cek apakah long liq exhausted
+            if long_dist < 0.5:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
-                "reason": f"Empty Ask + Long Squeeze: up_energy={up_energy:.2f} (no buyer) + long liq {long_dist:.2f}% → dump fuel",
-                "priority": -950
+                "reason": f"Empty Book Trap: No ask resistance ({up_energy:.2f}) + Long Liq dekat ({long_dist:.2f}%) → Rawan Long Squeeze",
+                "priority": -260
             }
-        
-        # Logic lama hanya untuk liq jauh (>2%)
-        if down_energy < 0.1 and short_dist > 2.0:
-            return {"override": True, "bias": "LONG", "reason": "Empty Book Trap (liq far)", "priority": -260}
-        
-        if up_energy < 0.1 and long_dist > 2.0:
-            return {"override": True, "bias": "SHORT", "reason": "Empty Book Trap (liq far)", "priority": -260}
-        
         return {"override": False}
 
 class ExhaustedLiquidityReversal:
@@ -907,31 +671,32 @@ class MasterSqueezeRule:
     Maka default bias harus: LONG UNTIL SHORT LIQ SWEPT
     
     Priority: -1100 (tertinggi absolut)
-    
-    🚨 FIX: Dynamic Threshold untuk Low Cap
-    - Jika volume rendah, pergerakan 2% sudah signifikan (bukan 5%)
-    - Turunkan threshold untuk koin seperti PLAY/ONO yang bisa squeeze cuma dengan 2%
     """
     @staticmethod
     def detect(short_dist: float, long_dist: float, change_5m: float,
                down_energy: float, up_energy: float, volume_ratio: float) -> Dict:
-        # Dynamic Threshold: Jika volume rendah, pergerakan 2% sudah signifikan
-        move_threshold = 2.0 if volume_ratio < 0.7 else 5.0
-        
         # MASTER LONG RULE
-        if (short_dist < 1.5 and change_5m > move_threshold and down_energy == 0):
+        if (
+            short_dist < 0.8 and
+            change_5m > 5 and
+            down_energy == 0
+        ):
             return {
                 "override": True,
                 "bias": "LONG",
-                "reason": f"MASTER SQUEEZE: Short liq {short_dist}% + No Seller + Low Vol → HFT will sweep",
+                "reason": f"MASTER SQUEEZE RULE: Short liq {short_dist:.2f}% terlalu dekat + momentum {change_5m:.1f}% + no seller (down_energy=0) → LONG UNTIL SHORT LIQ SWEPT",
                 "priority": -1100
             }
-        # MASTER SHORT RULE
-        if (long_dist < 1.5 and change_5m < -move_threshold and up_energy == 0):
+        # MASTER SHORT RULE - mirror
+        if (
+            long_dist < 0.8 and
+            change_5m < -5 and
+            up_energy == 0
+        ):
             return {
                 "override": True,
                 "bias": "SHORT",
-                "reason": f"MASTER SQUEEZE: Long liq {long_dist}% + No Buyer + Low Vol → HFT will dump",
+                "reason": f"MASTER SQUEEZE RULE: Long liq {long_dist:.2f}% terlalu dekat + momentum {change_5m:.1f}% + no buyer (up_energy=0) → SHORT UNTIL LONG LIQ SWEPT",
                 "priority": -1100
             }
         return {"override": False}
@@ -1655,33 +1420,22 @@ class PumpExhaustionTrap:
     🔥 NEW: Detects thin pumps that are likely reversal traps.
     Based on lecturer's feedback: pump with low volume, no sellers (down_energy=0),
     but long liq is closer than short liq → HFT will reverse to grab long liquidations.
-    
-    🚨 CRITICAL FIX: Vacuum Pump vs Exhaustion
-    - Jika down_energy = 0 (No Seller), ini BUKAN exhaustion, ini VACUUM!
-    - Jangan SHORT kalau tidak ada yang jual
-    - Exhaustion valid hanya jika ada resistance (up_energy) tapi harga mentok
-    
-    Priority: -500 untuk real exhaustion, skip jika vacuum
+    Priority -216: between ThinOrderBookPump (-217) and EnergyTrap (-217)
     """
     @staticmethod
     def detect(change_5m: float, volume_ratio: float, down_energy: float,
-               long_liq: float, short_liq: float, rsi6: float, ofi_bias: str) -> Dict:
-        
-        # CRITICAL FIX: Jika down_energy = 0 (No Seller), ini BUKAN exhaustion, ini VACUUM!
-        # Jangan SHORT kalau tidak ada yang jual
-        if down_energy < 0.01:
-            return {"override": False, "reason": "No Seller detected → Vacuum Pump likely"}
-
-        # Exhaustion valid hanya jika ada resistance (up_energy) tapi harga mentok
-        if (change_5m > 3.0 and
-            volume_ratio < 0.5 and
-            long_liq < short_liq and  # Long liq lebih dekat (bahaya buat long)
-            rsi6 > 70):               # Benar-benar overbought
+               long_liq: float, short_liq: float, rsi6: float) -> Dict:
+        # Pump dengan volume rendah, no sellers, dan long liq lebih dekat dari short liq
+        if (change_5m > 1.0 and
+            volume_ratio < 0.7 and
+            down_energy < 0.01 and
+            long_liq < short_liq and
+            rsi6 < 75):  # tidak overbought ekstrim, tapi sudah naik
             return {
                 "override": True,
                 "bias": "SHORT",
-                "reason": f"Real Exhaustion: Pump {change_5m}% low vol + Long Liq closer + RSI {rsi6}",
-                "priority": -500
+                "reason": f"Pump exhaustion trap: naik {change_5m:.1f}% dengan volume {volume_ratio:.2f}x, down_energy=0 tapi long liq {long_liq}% < short liq {short_liq}% → reversal untuk ambil long liq",
+                "priority": -216   # di antara ThinOrderBookPump (-217) dan EnergyTrap (-217) dll
             }
         return {"override": False}
 
@@ -1704,29 +1458,6 @@ class HFTTrapDetector:
                 "priority": -230
             }
         return {"override": False, "priority": 0}
-
-# ================= NEW: WASH TRADE DETECTOR =================
-class WashTradeDetector:
-    """
-    🚨 NEW DETECTOR: HFT Wash Trade Filter
-    Binance_algo sering bikin volume palsu (wash trade) di harga yang sama untuk menipu indikator volume.
-    Jika > 60% trade di harga sama persis → Wash Trade (Fake Volume)
-    
-    Gunakan di analyze(): if WashTradeDetector.detect(trades): final_confidence = "LOW"
-    """
-    @staticmethod
-    def detect(trades: List[Dict]) -> bool:
-        if len(trades) < 10:
-            return False
-        same_price_count = 0
-        last_price = trades[-1].get('p') if trades else None
-        for t in trades[-20:]:
-            if t.get('p') == last_price:
-                same_price_count += 1
-        # Jika > 60% trade di harga sama persis → Wash Trade (Fake Volume)
-        if same_price_count > 12:
-            return True
-        return False
 
 class VolumeConfidenceFilter:
     @staticmethod
@@ -2579,7 +2310,7 @@ class BinanceAnalyzer:
                     algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}
                     hft_6pct = {"bias": "NEUTRAL", "reason": ""}
                 else:
-                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"], ofi["bias"], ofi["strength"])
+                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"])
                     if empty_book["override"]:
                         final_bias = empty_book["bias"]
                         final_reason = empty_book["reason"]
@@ -2604,106 +2335,77 @@ class BinanceAnalyzer:
                         liq_magnet = {"override": False}          # <-- TAMBAHKAN untuk fix UnboundLocalError
                         exhausted_liquidity = {"override": False}  # <-- For ExhaustedLiquidityReversal
                         near_exhausted = {"override": False}       # <-- For NearExhaustedLiquidityReversal
-                        liq_magnet_override = {"override": False}  # <-- FIX UnboundLocalError for LiquidityMagnetOverride
 
                         # ========== HIGH PRIORITY OVERRIDES (with priority order) ==========
                         # Priority ladder (highest to lowest):
-                        # -2000: LiquidityProximityAbsolute (LIQ < 0.5% = ABSOLUTE)
-                        # -1500: SqueezeMomentumConfirmation
                         # -1100: MasterSqueezeRule (GOLDEN RULE)
                         # -1075: LiquidityMagnetOverride (NEW: LIQ MAGNET OVERRIDE FOR LOW VOLUME SQUEEZE)
                         # -1060: ExhaustedLiquidityReversal (NEW: REVERSAL WHEN LIQ EXHAUSTED + OVERBOUGHT/OVERSOLD)
                         # -1055: NearExhaustedLiquidityReversal (NEW: REVERSAL WHEN LIQ NEAR-EXHAUSTED <1.5% + OVERBOUGHT/OVERSOLD)
                         # -1050: StrictLiquidityProximity
                         # -1000: LiquidityMagnetContinuation (LIQ MAGNET LAYER)
-                        # -950: OFIAbsorptionSqueeze (ABSORPTION/FAKE OFI LAYER) + EmptyBookTrapDetector (FIXED)
+                        # -950: OFIAbsorptionSqueeze (ABSORPTION/FAKE OFI LAYER)
                         # -900: VelocityDecayReversal (REVERSAL CONFIRMATION)
                         # -850: EmptyBookMomentum (EMPTY BOOK/THIN BOOK LAYER)
                         # -265: SqueezeContinuationDetector (existing)
                         
-                        # ========== ABSOLUTE LIQUIDITY RULE (Priority -2000) ==========
-                        liq_absolute = LiquidityProximityAbsolute.detect(
-                            liq["short_dist"], liq["long_dist"], down_energy,
-                            ofi["bias"], ofi["strength"]
+                        # 1. MASTER SQUEEZE RULE (Priority -1100 - HIGHEST ABSOLUTE)
+                        master_squeeze = MasterSqueezeRule.detect(
+                            liq["short_dist"], liq["long_dist"], change_5m,
+                            down_energy, up_energy, volume_ratio
                         )
-                        if liq_absolute["override"]:
-                            final_bias = liq_absolute["bias"]
-                            final_reason = liq_absolute["reason"]
+                        if master_squeeze["override"]:
+                            final_bias = master_squeeze["bias"]
+                            final_reason = master_squeeze["reason"]
                             final_confidence = "ABSOLUTE"
-                            final_phase = "LIQUIDITY_ABSOLUTE"
-                            priority = liq_absolute["priority"]
-                            prob_engine.add(liq_absolute["bias"], 15.0)  # weight tertinggi absolut
+                            final_phase = "MASTER_SQUEEZE_RULE"
+                            priority = master_squeeze["priority"]
+                            prob_engine.add(master_squeeze["bias"], 10.0)
                         else:
-                            # ========== SQUEEZE MOMENTUM (Priority -1500) ==========
-                            squeeze_mom = SqueezeMomentumConfirmation.detect(
-                                liq["short_dist"], down_energy, ofi["bias"],
-                                ofi["strength"], change_5m, rsi6
+                            # 1.5. EXHAUSTED LIQUIDITY REVERSAL (Priority -1060)
+                            exhausted_liquidity = ExhaustedLiquidityReversal.detect(
+                                liq["short_dist"], liq["long_dist"], rsi6, volume_ratio
                             )
-                            if squeeze_mom["override"]:
-                                final_bias = squeeze_mom["bias"]
-                                final_reason = squeeze_mom["reason"]
+                            if exhausted_liquidity["override"]:
+                                final_bias = exhausted_liquidity["bias"]
+                                final_reason = exhausted_liquidity["reason"]
                                 final_confidence = "ABSOLUTE"
-                                final_phase = "SQUEEZE_MOMENTUM"
-                                priority = squeeze_mom["priority"]
-                                prob_engine.add(squeeze_mom["bias"], 12.0)
+                                final_phase = "EXHAUSTED_LIQUIDITY_REVERSAL"
+                                priority = exhausted_liquidity["priority"]
+                                prob_engine.add(exhausted_liquidity["bias"], 9.6)
                             else:
-                                # 1. MASTER SQUEEZE RULE (Priority -1100 - HIGHEST ABSOLUTE)
-                                master_squeeze = MasterSqueezeRule.detect(
-                                    liq["short_dist"], liq["long_dist"], change_5m,
-                                    down_energy, up_energy, volume_ratio
+                                # 1.6. NEAR EXHAUSTED LIQUIDITY REVERSAL (Priority -1055)
+                                near_exhausted = NearExhaustedLiquidityReversal.detect(
+                                    liq["short_dist"], liq["long_dist"], rsi6, volume_ratio
                                 )
-                                if master_squeeze["override"]:
-                                    final_bias = master_squeeze["bias"]
-                                    final_reason = master_squeeze["reason"]
+                                if near_exhausted["override"]:
+                                    final_bias = near_exhausted["bias"]
+                                    final_reason = near_exhausted["reason"]
                                     final_confidence = "ABSOLUTE"
-                                    final_phase = "MASTER_SQUEEZE_RULE"
-                                    priority = master_squeeze["priority"]
-                                    prob_engine.add(master_squeeze["bias"], 10.0)
+                                    final_phase = "NEAR_EXHAUSTED_LIQUIDITY_REVERSAL"
+                                    priority = near_exhausted["priority"]
+                                    prob_engine.add(near_exhausted["bias"], 9.7)
                                 else:
-                                    # 1.5. EXHAUSTED LIQUIDITY REVERSAL (Priority -1060)
-                                    exhausted_liquidity = ExhaustedLiquidityReversal.detect(
-                                        liq["short_dist"], liq["long_dist"], rsi6, volume_ratio
+                                    # 1.7. STRICT LIQUIDITY PROXIMITY (Priority -1050)
+                                    strict_liq = LiquidityProximityStrict.detect(
+                                        liq["short_dist"], liq["long_dist"], volume_ratio
                                     )
-                                    if exhausted_liquidity["override"]:
-                                        final_bias = exhausted_liquidity["bias"]
-                                        final_reason = exhausted_liquidity["reason"]
+                                    if strict_liq["override"]:
+                                        final_bias = strict_liq["bias"]
+                                        final_reason = strict_liq["reason"]
                                         final_confidence = "ABSOLUTE"
-                                        final_phase = "EXHAUSTED_LIQUIDITY_REVERSAL"
-                                        priority = exhausted_liquidity["priority"]
-                                        prob_engine.add(exhausted_liquidity["bias"], 9.6)
+                                        final_phase = "STRICT_LIQUIDITY"
+                                        priority = strict_liq["priority"]
+                                        prob_engine.add(strict_liq["bias"], 9.5)
                                     else:
-                                        # 1.6. NEAR EXHAUSTED LIQUIDITY REVERSAL (Priority -1055)
-                                        near_exhausted = NearExhaustedLiquidityReversal.detect(
-                                            liq["short_dist"], liq["long_dist"], rsi6, volume_ratio
+                                        # 1.7. LIQUIDITY MAGNET OVERRIDE (Priority -1075)
+                                        # NEW: Force direction based on liquidity magnet when close (<3%) and low volume (<0.7x)
+                                        # Threshold diperluas dari 2.5%/0.5x menjadi 3%/0.7x untuk menangkap lebih banyak squeeze plays
+                                        # Case studies: NOMUSDT (+8%), ARIAUSDT, BASUSDT (+8%)
+                                        liq_magnet_override = LiquidityMagnetOverride.detect(
+                                            liq["short_dist"], liq["long_dist"], volume_ratio,
+                                            rsi6_5m, change_5m
                                         )
-                                        if near_exhausted["override"]:
-                                            final_bias = near_exhausted["bias"]
-                                            final_reason = near_exhausted["reason"]
-                                            final_confidence = "ABSOLUTE"
-                                            final_phase = "NEAR_EXHAUSTED_LIQUIDITY_REVERSAL"
-                                            priority = near_exhausted["priority"]
-                                            prob_engine.add(near_exhausted["bias"], 9.7)
-                                        else:
-                                            # 1.7. STRICT LIQUIDITY PROXIMITY (Priority -1050)
-                                            strict_liq = LiquidityProximityStrict.detect(
-                                                liq["short_dist"], liq["long_dist"], volume_ratio
-                                            )
-                                            if strict_liq["override"]:
-                                                final_bias = strict_liq["bias"]
-                                                final_reason = strict_liq["reason"]
-                                                final_confidence = "ABSOLUTE"
-                                                final_phase = "STRICT_LIQUIDITY"
-                                                priority = strict_liq["priority"]
-                                                prob_engine.add(strict_liq["bias"], 9.5)
-                                            else:
-                                                # 1.7. LIQUIDITY MAGNET OVERRIDE (Priority -1075)
-                                                # NEW: Force direction based on liquidity magnet when close (<3%) and low volume (<0.7x)
-                                                # Threshold diperluas dari 2.5%/0.5x menjadi 3%/0.7x untuk menangkap lebih banyak squeeze plays
-                                                # Case studies: NOMUSDT (+8%), ARIAUSDT, BASUSDT (+8%)
-                                                liq_magnet_override = LiquidityMagnetOverride.detect(
-                                                    liq["short_dist"], liq["long_dist"], volume_ratio,
-                                                    rsi6_5m, change_5m
-                                                )
                                         if liq_magnet_override["override"]:
                                             final_bias = liq_magnet_override["bias"]
                                             final_reason = liq_magnet_override["reason"]
@@ -3022,7 +2724,7 @@ class BinanceAnalyzer:
                                                                                                     else:
                                                                                                         # NEW: PumpExhaustionTrap - detect thin pump reversal traps
                                                                                                         pump_exhaust = PumpExhaustionTrap.detect(change_5m, volume_ratio, down_energy,
-                                                                                                                                                 liq["long_dist"], liq["short_dist"], rsi6, ofi["bias"])
+                                                                                                                                                 liq["long_dist"], liq["short_dist"], rsi6)
                                                                                                         if pump_exhaust["override"]:
                                                                                                             final_bias = pump_exhaust["bias"]
                                                                                                             final_reason = pump_exhaust["reason"]
