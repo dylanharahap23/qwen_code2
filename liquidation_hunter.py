@@ -154,7 +154,7 @@ def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, ch
     Filters:
     1. Filter Kekuatan Sinyal Asli - MACD duel hanya boleh REVERSE jika sinyal asli tidak terlalu kuat
     2. Filter Arah OFI & Algo - Jika OFI, Algo, HFT semuanya sama dan bukan NEUTRAL, maka MACD duel tidak boleh membalik
-    3. Filter MACD Duel dengan Ambang Batas - reverse hanya terjadi jika duel cukup besar (abs > 10)
+    3. Filter MACD Duel dengan Ambang Batas - reverse hanya terjadi jika duel cukup besar (abs > 5)
     4. Filter Momentum & Likuiditas - Jika harga sudah bergerak cukup besar dan likuiditas target dekat, 
        jangan reverse kecuali dalam kondisi overbought/oversold ekstrem.
     """
@@ -179,14 +179,14 @@ def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, ch
     if ofi["bias"] == algo_type["bias"] == hft_6pct["bias"] != "NEUTRAL":
         return final_bias, "BLOCKED", "triple_confirmation"
     
-    # Filter 3: duel terlalu kecil (ambang batas abs(duel) < 10)
-    if abs(macd_decision.get("duel", 0)) < 10:
+    # Filter 3: duel terlalu kecil (ambang batas abs(duel) < 5)
+    if abs(macd_decision.get("duel", 0)) < 5:
         return final_bias, "IGNORED", f"duel_too_small={macd_decision.get('duel', 0)}"
     
     # Filter 4: momentum besar & likuiditas dekat
     if abs(change_5m) > 2.0 and (liq["short_dist"] < 2.0 or liq["long_dist"] < 2.0):
         # Jika kondisi ekstrem overbought/oversold, izinkan reverse (tidak di-block)
-        if (rsi6_5m > 80 and final_bias == "LONG") or (rsi6_5m < 20 and final_bias == "SHORT"):
+        if (rsi6_5m >= 75 and final_bias == "LONG") or (rsi6_5m <= 25 and final_bias == "SHORT"):
             # tetap lanjutkan, tidak block
             pass
         else:
@@ -538,7 +538,7 @@ class EmptyBookTrapDetector:
         # Jika down energy 0 (no bids) dan short liq dekat, tetapi long liq lebih dekat → jangan LONG
         if down_energy < 0.1 and short_dist < 2.0:
             # 🔥 Jangan override jika overbought ekstrem dan volume sangat rendah (exhaustion)
-            if rsi6_5m > 80 and volume_ratio < 0.6:
+            if rsi6_5m >= 75 and volume_ratio < 0.6:
                 return {"override": False}
             if long_dist < short_dist:
                 return {"override": False}
@@ -551,8 +551,7 @@ class EmptyBookTrapDetector:
         
         # Jika up energy 0 (no asks) dan long liq dekat, tetapi short liq lebih dekat → jangan SHORT
         if up_energy < 0.1 and long_dist < 2.0:
-            # 🔥 Jangan override jika oversold ekstrem dan volume sangat rendah (exhaustion)
-            if rsi6_5m < 20 and volume_ratio < 0.6:
+            if rsi6_5m <= 25 and volume_ratio < 0.6:
                 return {"override": False}
             if short_dist < long_dist:
                 return {"override": False}
@@ -574,7 +573,7 @@ class ExhaustedLiquidityReversal:
     Priority -1060 (between MasterSqueeze -1100 and StrictLiquidity -1050)
     
     FILTER: Jangan reverse jika volume sangat rendah (volume_ratio < 0.6) dan 
-    RSI 5m overbought/oversold ekstrem (rsi6_5m > 80 untuk SHORT, atau rsi6_5m < 20 untuk LONG)
+    RSI 5m overbought/oversold ekstrem (rsi6_5m > 70 untuk SHORT, atau rsi6_5m < 30 untuk LONG)
     → squeeze continuation akan tetap berjalan, bukan di‑reverse.
     """
     @staticmethod
@@ -582,7 +581,7 @@ class ExhaustedLiquidityReversal:
         # Short liq sangat kecil (<0.5%) dan overbought (RSI>70) dan volume rendah -> reversal ke SHORT
         if short_dist < 0.5 and rsi6 > 70 and volume_ratio < 1.0:
             # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m > 80:
+            if volume_ratio < 0.6 and rsi6_5m > 70:
                 return {"override": False}
             return {
                 "override": True,
@@ -593,7 +592,7 @@ class ExhaustedLiquidityReversal:
         # Mirror untuk long liq exhausted dengan oversold
         if long_dist < 0.5 and rsi6 < 30 and volume_ratio < 1.0:
             # Jangan reverse jika oversold ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m < 20:
+            if volume_ratio < 0.6 and rsi6_5m < 30:
                 return {"override": False}
             return {
                 "override": True,
@@ -611,7 +610,7 @@ class NearExhaustedLiquidityReversal:
     Priority -1055 (between ExhaustedLiquidityReversal -1060 and StrictLiquidityProximity -1050)
     
     FILTER: Jangan reverse jika volume sangat rendah (volume_ratio < 0.6) dan 
-    RSI 5m overbought/oversold ekstrem (rsi6_5m > 80 untuk SHORT, atau rsi6_5m < 20 untuk LONG)
+    RSI 5m overbought/oversold ekstrem (rsi6_5m > 70 untuk SHORT, atau rsi6_5m < 30 untuk LONG)
     → squeeze continuation akan tetap berjalan, bukan di‑reverse.
     """
     @staticmethod
@@ -619,7 +618,7 @@ class NearExhaustedLiquidityReversal:
         # Short liq mendekati habis (<1.5%) dan overbought (RSI>70) -> reversal ke SHORT
         if short_dist < 1.5 and rsi6 > 70 and volume_ratio < 1.0:
             # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m > 80:
+            if volume_ratio < 0.6 and rsi6_5m > 70:
                 return {"override": False}
             return {
                 "override": True,
@@ -630,7 +629,7 @@ class NearExhaustedLiquidityReversal:
         # Long liq mendekati habis (<1.5%) dan oversold (RSI<30) -> reversal ke LONG
         if long_dist < 1.5 and rsi6 < 30 and volume_ratio < 1.0:
             # Jangan reverse jika oversold ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m < 20:
+            if volume_ratio < 0.6 and rsi6_5m < 30:
                 return {"override": False}
             return {
                 "override": True,
