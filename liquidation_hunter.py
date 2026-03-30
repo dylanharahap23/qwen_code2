@@ -147,7 +147,7 @@ def macd_duel_logic(hist_scaled):
 
 
 # ================= LECTURER'S SARAN LOGIC: MACD DUEL SAFE FILTER =================
-def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq):
+def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq, rsi6_5m):
     """
     Filter pembatas agar MACD duel tidak membalik sinyal ketika sinyal asli sudah sangat kuat dan konsisten.
     
@@ -155,7 +155,8 @@ def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, ch
     1. Filter Kekuatan Sinyal Asli - MACD duel hanya boleh REVERSE jika sinyal asli tidak terlalu kuat
     2. Filter Arah OFI & Algo - Jika OFI, Algo, HFT semuanya sama dan bukan NEUTRAL, maka MACD duel tidak boleh membalik
     3. Filter MACD Duel dengan Ambang Batas - reverse hanya terjadi jika duel cukup besar (abs > 10)
-    4. Filter Momentum & Likuiditas - Jika harga sudah bergerak cukup besar dan likuiditas target dekat, jangan reverse
+    4. Filter Momentum & Likuiditas - Jika harga sudah bergerak cukup besar dan likuiditas target dekat, 
+       jangan reverse kecuali dalam kondisi overbought/oversold ekstrem.
     """
     if macd_decision["action"] != "REVERSE":
         return final_bias, macd_decision["action"], "NONE"
@@ -184,7 +185,12 @@ def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, ch
     
     # Filter 4: momentum besar & likuiditas dekat
     if abs(change_5m) > 2.0 and (liq["short_dist"] < 2.0 or liq["long_dist"] < 2.0):
-        return final_bias, "BLOCKED", "momentum_and_liq_proximity"
+        # Jika kondisi ekstrem overbought/oversold, izinkan reverse (tidak di-block)
+        if (rsi6_5m > 80 and final_bias == "LONG") or (rsi6_5m < 20 and final_bias == "SHORT"):
+            # tetap lanjutkan, tidak block
+            pass
+        else:
+            return final_bias, "BLOCKED", "momentum_and_liq_proximity"
     
     # Lolos semua filter → lakukan reverse
     new_bias = "SHORT" if final_bias == "LONG" else "LONG"
@@ -2970,7 +2976,7 @@ class BinanceAnalyzer:
                 # Apply lecturer's saran filter for REVERSE actions
                 if macd_decision["action"] == "REVERSE":
                     new_bias, action, filter_reason = apply_macd_duel_safe(
-                        macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq
+                        macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq, rsi6_5m
                     )
                     
                     if action == "REVERSE":
