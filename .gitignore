@@ -5,38 +5,30 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Logs
-*.log
-
-# Environment
-.env
-.env.local
-*.env.*
-
 # Dependencies
 .venv/
 venv/
-node_modules/
+env/
+.env
+.env.local
+.env.*
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
 
 # Build artifacts
 dist/
 build/
-target/
-
-# Editors
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Coverage
+*.egg-info/
 .coverage
-coverage/
 htmlcov/
-
-# Testing
-.pytest_cache/
 .mypy_cache/
+.pytest_cache/
 ```
