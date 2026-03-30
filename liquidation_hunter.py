@@ -581,7 +581,7 @@ class ExhaustedLiquidityReversal:
         # Short liq sangat kecil (<0.5%) dan overbought (RSI>70) dan volume rendah -> reversal ke SHORT
         if short_dist < 0.5 and rsi6 > 70 and volume_ratio < 1.0:
             # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m > 70:
+            if volume_ratio < 0.6 and rsi6_5m > 65:
                 return {"override": False}
             return {
                 "override": True,
@@ -592,7 +592,7 @@ class ExhaustedLiquidityReversal:
         # Mirror untuk long liq exhausted dengan oversold
         if long_dist < 0.5 and rsi6 < 30 and volume_ratio < 1.0:
             # Jangan reverse jika oversold ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m < 30:
+            if volume_ratio < 0.6 and rsi6_5m < 35:
                 return {"override": False}
             return {
                 "override": True,
@@ -618,7 +618,7 @@ class NearExhaustedLiquidityReversal:
         # Short liq mendekati habis (<1.5%) dan overbought (RSI>70) -> reversal ke SHORT
         if short_dist < 1.5 and rsi6 > 70 and volume_ratio < 1.0:
             # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m > 70:
+            if volume_ratio < 0.6 and rsi6_5m > 65:
                 return {"override": False}
             return {
                 "override": True,
@@ -629,7 +629,7 @@ class NearExhaustedLiquidityReversal:
         # Long liq mendekati habis (<1.5%) dan oversold (RSI<30) -> reversal ke LONG
         if long_dist < 1.5 and rsi6 < 30 and volume_ratio < 1.0:
             # Jangan reverse jika oversold ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m < 30:
+            if volume_ratio < 0.6 and rsi6_5m < 35:
                 return {"override": False}
             return {
                 "override": True,
@@ -842,10 +842,15 @@ class LiquidityProximityStrict:
     """
     🔥 Strict liquidity override when liq distance < 2.0% and volume not crazy.
     Priority -1050, between MasterSqueezeRule (-1100) and LiquidityMagnet (-1000).
+    
+    FILTER: Block jika extreme overbought/oversold dengan volume rendah
     """
     @staticmethod
-    def detect(short_dist: float, long_dist: float, volume_ratio: float) -> Dict:
-        if volume_ratio < 1.5:  # avoid overriding high‑volume markets
+    def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float) -> Dict:
+        if volume_ratio < 1.5:
+            # 🔥 Block jika extreme overbought/oversold dengan volume rendah
+            if (rsi6_5m > 70 and volume_ratio < 0.6) or (rsi6_5m < 30 and volume_ratio < 0.6):
+                return {"override": False}
             if short_dist < 2.0 and short_dist < long_dist:
                 return {
                     "override": True,
@@ -874,10 +879,15 @@ class LiquidityMagnetOverride:
     - BASUSDT: short_dist = 2.27% (<3), volume_ratio = 0.28 (<0.7), short_dist < long_dist → override ke LONG (+8%)
     
     Threshold lebih luas dari versi sebelumnya (2.5%→3%, 0.5x→0.7x) untuk menangkap lebih banyak squeeze plays.
+    
+    FILTER: Block jika extreme overbought/oversold dengan volume rendah
     """
     @staticmethod
     def detect(short_dist: float, long_dist: float, volume_ratio: float,
                rsi6_5m: float, change_5m: float) -> Dict:
+        # 🔥 Block jika extreme overbought/oversold dengan volume rendah
+        if (rsi6_5m > 70 and volume_ratio < 0.6) or (rsi6_5m < 30 and volume_ratio < 0.6):
+            return {"override": False}
         # SHORT LIQ CLOSE (<3%) AND VOLUME LOW (<0.7) AND SHORT LIQ CLOSER → FORCE LONG
         if short_dist < 3.0 and volume_ratio < 0.7 and short_dist < long_dist:
             return {
@@ -1362,13 +1372,16 @@ class LiquidityPriorityEnergyCheck:
 
 class LiquidityPriorityOverride:
     @staticmethod
-    def detect(short_dist: float, long_dist: float, volume_ratio: float) -> Dict:
+    def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float) -> Dict:
         if volume_ratio < 0.5:
             return {
                 "override": False,
                 "priority": 0,
                 "reason": "Volume too low (<0.5x) → Liquidity target unreliable (HFT Trap Risk)"
             }
+        # 🔥 Block jika extreme overbought/oversold dengan volume rendah
+        if (rsi6_5m > 70 and volume_ratio < 0.6) or (rsi6_5m < 30 and volume_ratio < 0.6):
+            return {"override": False}
         
         CLOSE_LIQ_THRESHOLD = 1.5
         if short_dist < CLOSE_LIQ_THRESHOLD and short_dist < long_dist:
@@ -2531,7 +2544,7 @@ class BinanceAnalyzer:
                                 else:
                                     # 1.7. STRICT LIQUIDITY PROXIMITY (Priority -1050)
                                     strict_liq = LiquidityProximityStrict.detect(
-                                        liq["short_dist"], liq["long_dist"], volume_ratio
+                                        liq["short_dist"], liq["long_dist"], volume_ratio, rsi6_5m
                                     )
                                     if strict_liq["override"]:
                                         final_bias = strict_liq["bias"]
@@ -2809,7 +2822,7 @@ class BinanceAnalyzer:
                                                                                         priority = overbought_trap_old["priority"]
                                                                                         prob_engine.add(overbought_trap_old["bias"], 3.0)
                                                                                     else:
-                                                                                        liq_priority = LiquidityPriorityOverride.detect(liq["short_dist"], liq["long_dist"], volume_ratio)
+                                                                                        liq_priority = LiquidityPriorityOverride.detect(liq["short_dist"], liq["long_dist"], volume_ratio, rsi6_5m)
                                                                                         if liq_priority["override"]:
                                                                                             bait = LiquidityBaitDetector.detect(liq["short_dist"], liq["long_dist"],
                                                                                                                                 up_energy, down_energy, agg, flow, volume_ratio)
