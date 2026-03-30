@@ -529,13 +529,17 @@ class OversoldSqueezeTrap:
 
 class EmptyBookTrapDetector:
     @staticmethod
-    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float) -> Dict:
+    def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float,
+               rsi6_5m: float, volume_ratio: float) -> Dict:
         # Jika short liq sudah sangat dekat (<0.5%), squeeze sudah habis → jangan override LONG
         if short_dist < 0.5:
             return {"override": False}
         
         # Jika down energy 0 (no bids) dan short liq dekat, tetapi long liq lebih dekat → jangan LONG
         if down_energy < 0.1 and short_dist < 2.0:
+            # 🔥 Jangan override jika overbought ekstrem dan volume sangat rendah (exhaustion)
+            if rsi6_5m > 80 and volume_ratio < 0.6:
+                return {"override": False}
             if long_dist < short_dist:
                 return {"override": False}
             return {
@@ -547,6 +551,9 @@ class EmptyBookTrapDetector:
         
         # Jika up energy 0 (no asks) dan long liq dekat, tetapi short liq lebih dekat → jangan SHORT
         if up_energy < 0.1 and long_dist < 2.0:
+            # 🔥 Jangan override jika oversold ekstrem dan volume sangat rendah (exhaustion)
+            if rsi6_5m < 20 and volume_ratio < 0.6:
+                return {"override": False}
             if short_dist < long_dist:
                 return {"override": False}
             # Juga cek apakah long liq exhausted
@@ -2446,7 +2453,8 @@ class BinanceAnalyzer:
                     algo_type = {"bias": "NEUTRAL", "confidence": "MEDIUM"}
                     hft_6pct = {"bias": "NEUTRAL", "reason": ""}
                 else:
-                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"])
+                    empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"],
+                                                              rsi6_5m, volume_ratio)
                     if empty_book["override"]:
                         final_bias = empty_book["bias"]
                         final_reason = empty_book["reason"]
