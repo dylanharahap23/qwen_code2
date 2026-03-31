@@ -1016,6 +1016,52 @@ class FlushExhaustionReversal:
         return {"override": False}
 
 
+# ================= NEW: EXTREME OVERBOUGHT/OVERSOLD CONTINUATION =================
+class ExtremeOverboughtContinuation:
+    """
+    🔥 Memaksa LONG ketika overbought ekstrem (RSI5m > 80), volume sangat rendah (<0.5x),
+    OFI LONG kuat (>0.5), dan up_energy > 0. Ini adalah squeeze continuation.
+    Priority -200.
+    """
+    @staticmethod
+    def detect(rsi6_5m: float, volume_ratio: float, ofi_bias: str, ofi_strength: float,
+               up_energy: float, short_liq: float) -> Dict:
+        if (rsi6_5m > 80 and
+            volume_ratio < 0.5 and
+            ofi_bias == "LONG" and
+            ofi_strength > 0.5 and
+            up_energy > 0):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Extreme overbought with strong OFI LONG: RSI5m {rsi6_5m:.1f}, volume {volume_ratio:.2f}x, OFI strength {ofi_strength:.2f} → squeeze continuation",
+                "priority": -200
+            }
+        return {"override": False}
+
+class ExtremeOversoldContinuation:
+    """
+    🔥 Memaksa SHORT ketika oversold ekstrem (RSI5m < 20), volume sangat rendah (<0.5x),
+    OFI SHORT kuat (>0.5), dan down_energy > 0. Ini adalah dump continuation.
+    Priority -200.
+    """
+    @staticmethod
+    def detect(rsi6_5m: float, volume_ratio: float, ofi_bias: str, ofi_strength: float,
+               down_energy: float, long_liq: float) -> Dict:
+        if (rsi6_5m < 20 and
+            volume_ratio < 0.5 and
+            ofi_bias == "SHORT" and
+            ofi_strength > 0.5 and
+            down_energy > 0):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Extreme oversold with strong OFI SHORT: RSI5m {rsi6_5m:.1f}, volume {volume_ratio:.2f}x, OFI strength {ofi_strength:.2f} → dump continuation",
+                "priority": -200
+            }
+        return {"override": False}
+
+
 # ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
 class SqueezeContinuationDetector:
     @staticmethod
@@ -3116,6 +3162,27 @@ class BinanceAnalyzer:
                                                                                                                     final_confidence = "MEDIUM"
                                                                                                                 final_phase = "PROBABILISTIC_VOTING"
                                                                                                                 priority = 0
+
+            # ========== NEW: EXTREME OVERBOUGHT/OVERSOLD CONTINUATION ==========
+            extreme_overbought_cont = ExtremeOverboughtContinuation.detect(
+                rsi6_5m, volume_ratio, ofi["bias"], ofi["strength"], up_energy, liq["short_dist"]
+            )
+            if extreme_overbought_cont["override"]:
+                final_bias = extreme_overbought_cont["bias"]
+                final_reason = extreme_overbought_cont["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "EXTREME_OVERBOUGHT_CONT"
+                priority = extreme_overbought_cont["priority"]
+            else:
+                extreme_oversold_cont = ExtremeOversoldContinuation.detect(
+                    rsi6_5m, volume_ratio, ofi["bias"], ofi["strength"], down_energy, liq["long_dist"]
+                )
+                if extreme_oversold_cont["override"]:
+                    final_bias = extreme_oversold_cont["bias"]
+                    final_reason = extreme_oversold_cont["reason"]
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "EXTREME_OVERSOLD_CONT"
+                    priority = extreme_oversold_cont["priority"]
 
             # ========== MACD DUEL OVERRIDE (WITH LECTURER'S SARAN FILTER) ==========
             if macd_decision["action"] != "NONE":
