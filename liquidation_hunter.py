@@ -1590,8 +1590,11 @@ class ExtremeEnergyImbalance:
 class EnergyTrapFilter:
     @staticmethod
     def detect(up_energy: float, down_energy: float, price_change_5m: float,
-               volume_ratio: float, rsi14: float) -> Dict:
+               volume_ratio: float, rsi14: float, short_liq: float, rsi6_5m: float) -> Dict:
         if down_energy < ENERGY_ZERO_THRESHOLD and up_energy < 1.0 and price_change_5m > 2.0 and volume_ratio < 1.0 and rsi14 > 60:
+            # 🔥 Jangan override jika short liq sangat dekat dan overbought ekstrem (masih squeeze)
+            if short_liq < 1.5 and volume_ratio < 0.6 and rsi6_5m > 70:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
@@ -1645,15 +1648,23 @@ class PumpExhaustionTrap:
 class HFTTrapDetector:
     @staticmethod
     def detect_fake_energy(down_energy: float, up_energy: float, price_change_5m: float,
-                           volume_ratio: float, rsi14: float) -> Dict:
+                           volume_ratio: float, rsi14: float, short_liq: float, long_liq: float,
+                           rsi6_5m: float, rsi6: float) -> Dict:
+        # SHORT trap (down_energy=0, price naik)
         if down_energy < ENERGY_ZERO_THRESHOLD and price_change_5m > 3.0 and volume_ratio < 0.7 and rsi14 > 60:
+            # 🔥 Jangan override jika short liq sangat dekat dan overbought ekstrem (masih squeeze)
+            if short_liq < 1.5 and volume_ratio < 0.6 and (rsi6_5m > 70 or rsi6 > 80):
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
                 "reason": f"Fake Energy: down_energy=0 tetapi harga naik {price_change_5m:.1f}% dengan volume turun {volume_ratio:.2f}x → HFT trap, akan dump",
                 "priority": -230
             }
+        # LONG trap (up_energy=0, price turun)
         if up_energy < ENERGY_ZERO_THRESHOLD and price_change_5m < -3.0 and volume_ratio < 0.7 and rsi14 < 40:
+            if long_liq < 1.5 and volume_ratio < 0.6 and (rsi6_5m < 30 or rsi6 < 20):
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "LONG",
@@ -2796,7 +2807,10 @@ class BinanceAnalyzer:
                                                         priority = short_squeeze["priority"]
                                                         prob_engine.add(short_squeeze["bias"], 3.0)
                                                     else:
-                                                        fake_energy = HFTTrapDetector.detect_fake_energy(down_energy, up_energy, change_5m, volume_ratio, rsi14)
+                                                        fake_energy = HFTTrapDetector.detect_fake_energy(
+                                                            down_energy, up_energy, change_5m, volume_ratio, rsi14,
+                                                            liq["short_dist"], liq["long_dist"], rsi6_5m, rsi6
+                                                        )
                                                         if fake_energy["override"]:
                                                             final_bias = fake_energy["bias"]
                                                             final_reason = fake_energy["reason"]
@@ -2947,7 +2961,10 @@ class BinanceAnalyzer:
                                                                                                             priority = pump_exhaust["priority"]
                                                                                                             prob_engine.add(pump_exhaust["bias"], 3.0)
                                                                                                         else:
-                                                                                                            energy_trap = EnergyTrapFilter.detect(up_energy, down_energy, change_5m, volume_ratio, rsi14)
+                                                                                                            energy_trap = EnergyTrapFilter.detect(
+                                                                                                                up_energy, down_energy, change_5m, volume_ratio, rsi14,
+                                                                                                                liq["short_dist"], rsi6_5m
+                                                                                                            )
                                                                                                             if energy_trap["override"]:
                                                                                                                 final_bias = energy_trap["bias"]
                                                                                                                 final_reason = energy_trap["reason"]
