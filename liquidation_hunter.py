@@ -147,7 +147,7 @@ def macd_duel_logic(hist_scaled):
 
 
 # ================= LECTURER'S SARAN LOGIC: MACD DUEL SAFE FILTER =================
-def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq, rsi6_5m):
+def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq, rsi6_5m, volume_ratio):
     """
     Filter pembatas agar MACD duel tidak membalik sinyal ketika sinyal asli sudah sangat kuat dan konsisten.
     
@@ -157,6 +157,7 @@ def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, ch
     3. Filter MACD Duel dengan Ambang Batas - reverse hanya terjadi jika duel cukup besar (abs > 5)
     4. Filter Momentum & Likuiditas - Jika harga sudah bergerak cukup besar dan likuiditas target dekat, 
        jangan reverse kecuali dalam kondisi overbought/oversold ekstrem.
+    5. Filter OFI Conflict - Block reversal yang bertentangan dengan OFI kuat saat volume rendah.
     """
     if macd_decision["action"] != "REVERSE":
         return final_bias, macd_decision["action"], "NONE"
@@ -192,8 +193,14 @@ def apply_macd_duel_safe(macd_decision, final_bias, algo_type, hft_6pct, ofi, ch
         else:
             return final_bias, "BLOCKED", "momentum_and_liq_proximity"
     
-    # Lolos semua filter → lakukan reverse
+    # 🔥 Filter 5: Block reverse if it conflicts with strong OFI under low volume
     new_bias = "SHORT" if final_bias == "LONG" else "LONG"
+    if new_bias == "LONG" and ofi["bias"] == "SHORT" and ofi["strength"] > 0.7 and volume_ratio < 0.6:
+        return final_bias, "BLOCKED", "ofi_short_conflict"
+    if new_bias == "SHORT" and ofi["bias"] == "LONG" and ofi["strength"] > 0.7 and volume_ratio < 0.6:
+        return final_bias, "BLOCKED", "ofi_long_conflict"
+    
+    # Lolos semua filter → lakukan reverse
     return new_bias, "REVERSE", "passed_all_filters"
 
 # ================= WEBSOCKET CONNECTOR (unchanged) =================
@@ -495,6 +502,15 @@ class OverboughtDistributionTrap:
         NEW: Tidak override jika short liq sangat dekat (<2%) dan lebih dekat dari long liq
         → liquidity mengarah LONG, jangan SHORT.
         """
+        # 🔥 EXTREME OVERBOUGHT: force SHORT regardless of liquidity proximity
+        if rsi6 > 85 and volume_ratio < 0.6 and down_energy < 0.01:
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Extreme overbought: RSI {rsi6:.1f} > 85, volume {volume_ratio:.2f}x, no sellers → forced dump",
+                "priority": -262   # higher than regular traps
+            }
+        
         # Jika short liq sangat dekat dan lebih dekat dari long liq → liquidity mengarah LONG, jangan SHORT
         if short_dist < 2.0 and short_dist < long_dist:
             return {"override": False}
@@ -546,6 +562,15 @@ class OversoldSqueezeTrap:
         NEW: Tidak override jika long liq sangat dekat (<2%) dan lebih dekat dari short liq
         → liquidity mengarah SHORT, jangan LONG.
         """
+        # 🔥 EXTREME OVERSOLD: force LONG regardless of liquidity proximity
+        if rsi6 < 15 and volume_ratio < 0.6 and up_energy < 0.01:
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Extreme oversold: RSI {rsi6:.1f} < 15, volume {volume_ratio:.2f}x, no buyers → forced bounce",
+                "priority": -262
+            }
+        
         # Jika long liq sangat dekat dan lebih dekat dari short liq → liquidity mengarah SHORT, jangan LONG
         if long_dist < 2.0 and long_dist < short_dist:
             return {"override": False}
@@ -3091,7 +3116,7 @@ class BinanceAnalyzer:
                 # Apply lecturer's saran filter for REVERSE actions
                 if macd_decision["action"] == "REVERSE":
                     new_bias, action, filter_reason = apply_macd_duel_safe(
-                        macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq, rsi6_5m
+                        macd_decision, final_bias, algo_type, hft_6pct, ofi, change_5m, liq, rsi6_5m, volume_ratio
                     )
                     
                     if action == "REVERSE":
