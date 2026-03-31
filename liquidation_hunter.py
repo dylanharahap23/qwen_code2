@@ -931,21 +931,32 @@ class LiquidityProximityStrict:
     Priority -1050, between MasterSqueezeRule (-1100) and LiquidityMagnet (-1000).
     
     FILTER: Block jika extreme overbought/oversold dengan volume rendah
+    🔥 NEW: Blokir jika arah bertentangan dengan OFI kuat
     """
     @staticmethod
-    def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float) -> Dict:
+    def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float,
+               ofi_bias: str, ofi_strength: float, rsi6: float, obv_trend: str) -> Dict:
         if volume_ratio < 1.5:
             # 🔥 Block jika extreme overbought/oversold dengan volume rendah
             if (rsi6_5m > 70 and volume_ratio < 0.6) or (rsi6_5m < 30 and volume_ratio < 0.6):
                 return {"override": False}
-            if short_dist < 2.0 and short_dist < long_dist:
+            # 🔥 Blokir jika arah bertentangan dengan OFI kuat
+            if short_dist < 2.0 and short_dist < long_dist:   # akan paksa LONG
+                if ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.6:
+                    return {"override": False}
+                if rsi6 < 20 and obv_trend == "NEGATIVE_EXTREME" and volume_ratio < 0.6:
+                    return {"override": False}
                 return {
                     "override": True,
                     "bias": "LONG",
                     "reason": f"Strict liquidity proximity: short liq {short_dist:.2f}% < 2%, forcing LONG",
                     "priority": -1050
                 }
-            if long_dist < 2.0 and long_dist < short_dist:
+            if long_dist < 2.0 and long_dist < short_dist:   # akan paksa SHORT
+                if ofi_bias == "LONG" and ofi_strength > 0.7 and volume_ratio < 0.6:
+                    return {"override": False}
+                if rsi6 > 80 and obv_trend == "POSITIVE_EXTREME" and volume_ratio < 0.6:
+                    return {"override": False}
                 return {
                     "override": True,
                     "bias": "SHORT",
@@ -1058,6 +1069,52 @@ class ExtremeOversoldContinuation:
                 "bias": "SHORT",
                 "reason": f"Extreme oversold with strong OFI SHORT: RSI5m {rsi6_5m:.1f}, volume {volume_ratio:.2f}x, OFI strength {ofi_strength:.2f} → dump continuation",
                 "priority": -200
+            }
+        return {"override": False}
+
+
+# ================= NEW: EXTREME OVERSOLD/SHORT CONTINUATION (LECTURER'S LOGIC) =================
+class ExtremeOversoldShortContinuation:
+    """
+    🔥 Memaksa SHORT ketika oversold ekstrem (RSI6 < 20), volume sangat rendah (<0.6x),
+    OFI SHORT kuat (>0.6), dan down_energy > 0.
+    Priority -203 (lebih tinggi dari ExtremeOverboughtContinuation -200).
+    """
+    @staticmethod
+    def detect(rsi6: float, volume_ratio: float, ofi_bias: str, ofi_strength: float,
+               down_energy: float, long_liq: float) -> Dict:
+        if (rsi6 < 20 and
+            volume_ratio < 0.6 and
+            ofi_bias == "SHORT" and
+            ofi_strength > 0.6 and
+            down_energy > 0):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Extreme oversold with strong OFI SHORT: RSI6 {rsi6:.1f}, volume {volume_ratio:.2f}x, OFI strength {ofi_strength:.2f} → dump continuation",
+                "priority": -203
+            }
+        return {"override": False}
+
+class ExtremeOverboughtLongContinuation:
+    """
+    🔥 Memaksa LONG ketika overbought ekstrem (RSI6 > 80), volume sangat rendah (<0.6x),
+    OFI LONG kuat (>0.6), dan up_energy > 0.
+    Priority -202.
+    """
+    @staticmethod
+    def detect(rsi6: float, volume_ratio: float, ofi_bias: str, ofi_strength: float,
+               up_energy: float, short_liq: float) -> Dict:
+        if (rsi6 > 80 and
+            volume_ratio < 0.6 and
+            ofi_bias == "LONG" and
+            ofi_strength > 0.6 and
+            up_energy > 0):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Extreme overbought with strong OFI LONG: RSI6 {rsi6:.1f}, volume {volume_ratio:.2f}x, OFI strength {ofi_strength:.2f} → squeeze continuation",
+                "priority": -202
             }
         return {"override": False}
 
@@ -2690,7 +2747,8 @@ class BinanceAnalyzer:
                                 else:
                                     # 1.7. STRICT LIQUIDITY PROXIMITY (Priority -1050)
                                     strict_liq = LiquidityProximityStrict.detect(
-                                        liq["short_dist"], liq["long_dist"], volume_ratio, rsi6_5m
+                                        liq["short_dist"], liq["long_dist"], volume_ratio, rsi6_5m,
+                                        ofi["bias"], ofi["strength"], rsi6, obv_trend
                                     )
                                     if strict_liq["override"]:
                                         final_bias = strict_liq["bias"]
@@ -3164,25 +3222,47 @@ class BinanceAnalyzer:
                                                                                                                 priority = 0
 
             # ========== NEW: EXTREME OVERBOUGHT/OVERSOLD CONTINUATION ==========
-            extreme_overbought_cont = ExtremeOverboughtContinuation.detect(
-                rsi6_5m, volume_ratio, ofi["bias"], ofi["strength"], up_energy, liq["short_dist"]
+            # First check new lecturer's extreme continuation detectors (higher priority)
+            extreme_oversold_short = ExtremeOversoldShortContinuation.detect(
+                rsi6, volume_ratio, ofi["bias"], ofi["strength"], down_energy, liq["long_dist"]
             )
-            if extreme_overbought_cont["override"]:
-                final_bias = extreme_overbought_cont["bias"]
-                final_reason = extreme_overbought_cont["reason"]
+            if extreme_oversold_short["override"]:
+                final_bias = extreme_oversold_short["bias"]
+                final_reason = extreme_oversold_short["reason"]
                 final_confidence = "ABSOLUTE"
-                final_phase = "EXTREME_OVERBOUGHT_CONT"
-                priority = extreme_overbought_cont["priority"]
+                final_phase = "EXTREME_OVERSOLD_SHORT"
+                priority = extreme_oversold_short["priority"]
             else:
-                extreme_oversold_cont = ExtremeOversoldContinuation.detect(
-                    rsi6_5m, volume_ratio, ofi["bias"], ofi["strength"], down_energy, liq["long_dist"]
+                extreme_overbought_long = ExtremeOverboughtLongContinuation.detect(
+                    rsi6, volume_ratio, ofi["bias"], ofi["strength"], up_energy, liq["short_dist"]
                 )
-                if extreme_oversold_cont["override"]:
-                    final_bias = extreme_oversold_cont["bias"]
-                    final_reason = extreme_oversold_cont["reason"]
+                if extreme_overbought_long["override"]:
+                    final_bias = extreme_overbought_long["bias"]
+                    final_reason = extreme_overbought_long["reason"]
                     final_confidence = "ABSOLUTE"
-                    final_phase = "EXTREME_OVERSOLD_CONT"
-                    priority = extreme_oversold_cont["priority"]
+                    final_phase = "EXTREME_OVERBOUGHT_LONG"
+                    priority = extreme_overbought_long["priority"]
+                else:
+                    # Fallback to original extreme continuation detectors
+                    extreme_overbought_cont = ExtremeOverboughtContinuation.detect(
+                        rsi6_5m, volume_ratio, ofi["bias"], ofi["strength"], up_energy, liq["short_dist"]
+                    )
+                    if extreme_overbought_cont["override"]:
+                        final_bias = extreme_overbought_cont["bias"]
+                        final_reason = extreme_overbought_cont["reason"]
+                        final_confidence = "ABSOLUTE"
+                        final_phase = "EXTREME_OVERBOUGHT_CONT"
+                        priority = extreme_overbought_cont["priority"]
+                    else:
+                        extreme_oversold_cont = ExtremeOversoldContinuation.detect(
+                            rsi6_5m, volume_ratio, ofi["bias"], ofi["strength"], down_energy, liq["long_dist"]
+                        )
+                        if extreme_oversold_cont["override"]:
+                            final_bias = extreme_oversold_cont["bias"]
+                            final_reason = extreme_oversold_cont["reason"]
+                            final_confidence = "ABSOLUTE"
+                            final_phase = "EXTREME_OVERSOLD_CONT"
+                            priority = extreme_oversold_cont["priority"]
 
             # ========== MACD DUEL OVERRIDE (WITH LECTURER'S SARAN FILTER) ==========
             if macd_decision["action"] != "NONE":
