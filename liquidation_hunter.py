@@ -575,13 +575,20 @@ class ExhaustedLiquidityReversal:
     FILTER: Jangan reverse jika volume sangat rendah (volume_ratio < 0.6) dan 
     RSI 5m overbought/oversold ekstrem (rsi6_5m > 70 untuk SHORT, atau rsi6_5m < 30 untuk LONG)
     → squeeze continuation akan tetap berjalan, bukan di‑reverse.
+    
+    NEW FILTER: Jangan reverse jika OFI bertentangan (OFI LONG kuat saat mau SHORT, atau OFI SHORT kuat saat mau LONG)
+    dan volume rendah (volume_ratio < 0.7).
     """
     @staticmethod
-    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float, rsi6_5m: float) -> Dict:
+    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float, rsi6_5m: float,
+               ofi_bias: str, ofi_strength: float) -> Dict:
         # Short liq sangat kecil (<0.5%) dan overbought (RSI>70) dan volume rendah -> reversal ke SHORT
         if short_dist < 0.5 and rsi6 > 70 and volume_ratio < 1.0:
             # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
             if volume_ratio < 0.6 and rsi6_5m > 65:
+                return {"override": False}
+            # 🔥 Filter 2: OFI bertentangan (OFI LONG kuat) dan volume rendah
+            if volume_ratio < 0.7 and ofi_bias == "LONG" and ofi_strength > 0.6:
                 return {"override": False}
             return {
                 "override": True,
@@ -593,6 +600,9 @@ class ExhaustedLiquidityReversal:
         if long_dist < 0.5 and rsi6 < 30 and volume_ratio < 1.0:
             # Jangan reverse jika oversold ekstrem dan volume sangat rendah (masih squeeze)
             if volume_ratio < 0.6 and rsi6_5m < 35:
+                return {"override": False}
+            # 🔥 Filter 2: OFI bertentangan (OFI SHORT kuat) dan volume rendah
+            if volume_ratio < 0.7 and ofi_bias == "SHORT" and ofi_strength > 0.6:
                 return {"override": False}
             return {
                 "override": True,
@@ -612,13 +622,20 @@ class NearExhaustedLiquidityReversal:
     FILTER: Jangan reverse jika volume sangat rendah (volume_ratio < 0.6) dan 
     RSI 5m overbought/oversold ekstrem (rsi6_5m > 70 untuk SHORT, atau rsi6_5m < 30 untuk LONG)
     → squeeze continuation akan tetap berjalan, bukan di‑reverse.
+    
+    NEW FILTER: Jangan reverse jika OFI bertentangan (OFI LONG kuat saat mau SHORT, atau OFI SHORT kuat saat mau LONG)
+    dan volume rendah (volume_ratio < 0.7).
     """
     @staticmethod
-    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float, rsi6_5m: float) -> Dict:
+    def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float, rsi6_5m: float,
+               ofi_bias: str, ofi_strength: float) -> Dict:
         # Short liq mendekati habis (<1.5%) dan overbought (RSI>70) -> reversal ke SHORT
         if short_dist < 1.5 and rsi6 > 70 and volume_ratio < 1.0:
             # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
             if volume_ratio < 0.6 and rsi6_5m > 65:
+                return {"override": False}
+            # 🔥 Filter 2: OFI bertentangan (OFI LONG kuat) dan volume rendah
+            if volume_ratio < 0.7 and ofi_bias == "LONG" and ofi_strength > 0.6:
                 return {"override": False}
             return {
                 "override": True,
@@ -630,6 +647,9 @@ class NearExhaustedLiquidityReversal:
         if long_dist < 1.5 and rsi6 < 30 and volume_ratio < 1.0:
             # Jangan reverse jika oversold ekstrem dan volume sangat rendah (masih squeeze)
             if volume_ratio < 0.6 and rsi6_5m < 35:
+                return {"override": False}
+            # 🔥 Filter 2: OFI bertentangan (OFI SHORT kuat) dan volume rendah
+            if volume_ratio < 0.7 and ofi_bias == "SHORT" and ofi_strength > 0.6:
                 return {"override": False}
             return {
                 "override": True,
@@ -2520,7 +2540,8 @@ class BinanceAnalyzer:
                         else:
                             # 1.5. EXHAUSTED LIQUIDITY REVERSAL (Priority -1060)
                             exhausted_liquidity = ExhaustedLiquidityReversal.detect(
-                                liq["short_dist"], liq["long_dist"], rsi6, volume_ratio, rsi6_5m
+                                liq["short_dist"], liq["long_dist"], rsi6, volume_ratio, rsi6_5m,
+                                ofi["bias"], ofi["strength"]
                             )
                             if exhausted_liquidity["override"]:
                                 final_bias = exhausted_liquidity["bias"]
@@ -2532,7 +2553,8 @@ class BinanceAnalyzer:
                             else:
                                 # 1.6. NEAR EXHAUSTED LIQUIDITY REVERSAL (Priority -1055)
                                 near_exhausted = NearExhaustedLiquidityReversal.detect(
-                                    liq["short_dist"], liq["long_dist"], rsi6, volume_ratio, rsi6_5m
+                                    liq["short_dist"], liq["long_dist"], rsi6, volume_ratio, rsi6_5m,
+                                    ofi["bias"], ofi["strength"]
                                 )
                                 if near_exhausted["override"]:
                                     final_bias = near_exhausted["bias"]
