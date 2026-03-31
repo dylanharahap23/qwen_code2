@@ -591,14 +591,17 @@ class OversoldSqueezeTrap:
 class EmptyBookTrapDetector:
     @staticmethod
     def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float,
-               rsi6_5m: float, volume_ratio: float) -> Dict:
+               rsi6_5m: float, volume_ratio: float, obv_trend: str, rsi6: float) -> Dict:
         # Jika short liq sudah sangat dekat (<0.5%), squeeze sudah habis → jangan override LONG
         if short_dist < 0.5:
             return {"override": False}
         
-        # Jika down energy 0 (no bids) dan short liq dekat, tetapi long liq lebih dekat → jangan LONG
+        # ===== CABANG LONG (bid kosong) =====
         if down_energy < 0.1 and short_dist < 2.0:
-            # 🔥 Jangan override jika overbought ekstrem dan volume sangat rendah (exhaustion)
+            # 🔥 Block LONG jika overbought ekstrem dengan OBV positif ekstrem
+            if rsi6 > 75 and obv_trend == "POSITIVE_EXTREME" and volume_ratio < 0.8:
+                return {"override": False}
+            # Filter sebelumnya
             if rsi6_5m >= 75 and volume_ratio < 0.6:
                 return {"override": False}
             if long_dist < short_dist:
@@ -610,13 +613,16 @@ class EmptyBookTrapDetector:
                 "priority": -260
             }
         
-        # Jika up energy 0 (no asks) dan long liq dekat, tetapi short liq lebih dekat → jangan SHORT
+        # ===== CABANG SHORT (ask kosong) =====
         if up_energy < 0.1 and long_dist < 2.0:
+            # 🔥 Block SHORT jika oversold ekstrem dengan OBV negatif ekstrem
+            if rsi6 < 25 and obv_trend == "NEGATIVE_EXTREME" and volume_ratio < 0.8:
+                return {"override": False}
+            # Filter sebelumnya
             if rsi6_5m <= 25 and volume_ratio < 0.6:
                 return {"override": False}
             if short_dist < long_dist:
                 return {"override": False}
-            # Juga cek apakah long liq exhausted
             if long_dist < 0.5:
                 return {"override": False}
             return {
@@ -2558,7 +2564,7 @@ class BinanceAnalyzer:
                     hft_6pct = {"bias": "NEUTRAL", "reason": ""}
                 else:
                     empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"],
-                                                              rsi6_5m, volume_ratio)
+                                                              rsi6_5m, volume_ratio, obv_trend, rsi6)
                     if empty_book["override"]:
                         final_bias = empty_book["bias"]
                         final_reason = empty_book["reason"]
