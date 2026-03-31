@@ -273,11 +273,47 @@ class LowVolumeContinuation:
 
 class AntiReversalGuard:
     @staticmethod
-    def should_block(obv_trend: str, rsi6: float, volume_ratio: float) -> bool:
-        """Block any LONG reversal when conditions are extreme bearish"""
+    def should_block_long(obv_trend: str, rsi6: float, volume_ratio: float,
+                          ofi_bias: str, ofi_strength: float, long_dist: float) -> bool:
+        """
+        Returns True if LONG reversal should be blocked.
+        Exceptions:
+        - Extreme oversold with low volume (rsi6 < 20 and volume_ratio < 0.6)
+        - OFI strongly LONG (strength > 0.5)
+        - Long liquidity very close (< 1.0%)
+        """
         if (obv_trend == "NEGATIVE_EXTREME" and
             rsi6 < 30 and
             volume_ratio < 0.7):
+            # Exceptions
+            if rsi6 < 20 and volume_ratio < 0.6:
+                return False
+            if ofi_bias == "LONG" and ofi_strength > 0.5:
+                return False
+            if long_dist < 1.0:
+                return False
+            return True
+        return False
+
+    @staticmethod
+    def should_block_short(obv_trend: str, rsi6: float, volume_ratio: float,
+                           ofi_bias: str, ofi_strength: float, short_dist: float) -> bool:
+        """
+        Returns True if SHORT reversal should be blocked.
+        Exceptions:
+        - Extreme overbought with low volume (rsi6 > 80 and volume_ratio < 0.6)
+        - OFI strongly SHORT (strength > 0.5)
+        - Short liquidity very close (< 1.0%)
+        """
+        if (obv_trend == "POSITIVE_EXTREME" and
+            rsi6 > 70 and
+            volume_ratio < 0.7):
+            if rsi6 > 80 and volume_ratio < 0.6:
+                return False
+            if ofi_bias == "SHORT" and ofi_strength > 0.5:
+                return False
+            if short_dist < 1.0:
+                return False
             return True
         return False
 
@@ -3061,13 +3097,20 @@ class BinanceAnalyzer:
                     final_phase = "MACD_DUEL_FOLLOW"
                     final_confidence = "ABSOLUTE"
 
-            # ========== Anti‑reversal guard ==========
-            if AntiReversalGuard.should_block(obv_trend, rsi6, volume_ratio):
+            # ========== Anti-reversal guard ==========
+            if AntiReversalGuard.should_block_long(obv_trend, rsi6, volume_ratio, ofi["bias"], ofi["strength"], liq["long_dist"]):
                 if final_bias == "LONG":
                     final_bias = "SHORT"
-                    final_reason = f"Anti‑reversal guard: OBV extreme, RSI {rsi6:.1f}<30, low volume → blocking LONG, force SHORT"
+                    final_reason = f"Anti-reversal guard: OBV extreme, RSI {rsi6:.1f}<30, low volume → blocking LONG, force SHORT"
                     final_confidence = "ABSOLUTE"
                     final_phase = "ANTI_REVERSAL"
+
+            if AntiReversalGuard.should_block_short(obv_trend, rsi6, volume_ratio, ofi["bias"], ofi["strength"], liq["short_dist"]):
+                if final_bias == "SHORT":
+                    final_bias = "LONG"
+                    final_reason = f"Anti-reversal guard: OBV extreme, RSI {rsi6:.1f}>70, low volume → blocking SHORT, force LONG"
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "ANTI_REVERSAL_SHORT"
 
             # ========== Latency arb check ==========
             if not LatencyArbitragePredictor.is_safe(final_bias, price, predicted_price):
