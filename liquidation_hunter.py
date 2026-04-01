@@ -3529,6 +3529,16 @@ class BinanceAnalyzer:
             # Time decay filter (anti‑flip)
             final_bias = TimeDecayFilter.apply(final_bias)
 
+            # ========== FLOATING PNL STABILITY FILTER ==========
+            # Prevents signal flip-flop when price hasn't moved significantly
+            current_floating_pnl = self.state_mgr.get_floating_pnl_pct(price)
+            if self.state_mgr.last_bias != "NEUTRAL" and self.state_mgr.last_bias != final_bias:
+                # Jika floating PnL masih sangat kecil (<0.5%) dan pergerakan harga kecil (<1%)
+                # dan sinyal tidak berasal dari prioritas sangat tinggi (misal < -900)
+                if abs(current_floating_pnl) < 0.5 and abs(change_5m) < 1.0 and priority > -900:
+                    final_bias = self.state_mgr.last_bias
+                    final_reason += f" | Stability hold: floating PnL {current_floating_pnl:.2f}% < 0.5%, keep previous bias"
+
             # Position sizing
             trap_strength = 0.0
             if "Fake bounce" in final_reason or "Cascade dump" in final_reason:
