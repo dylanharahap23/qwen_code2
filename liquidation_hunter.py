@@ -1767,8 +1767,13 @@ class ExtremeEnergyImbalance:
         if up_energy < down_energy and rsi6_5m > 30:
             return {"override": False, "priority": 0}
         
+        # 🔥 Kasus: down_energy=0, up_energy > 0 -> seharusnya SHORT (tidak ada buyer)
         if down_energy < ENERGY_ZERO_THRESHOLD and up_energy > MIN_ENERGY_TO_MOVE:
+            # Jika OFI LONG kuat, bisa jadi pembelian masih berlangsung, tidak di-block
             if price_change_5m > 1.5 and ofi_bias == "LONG" and ofi_strength > 0.3:
+                return {"override": False, "priority": 0}
+            # 🔥 BLOCK jika OFI SHORT kuat dan volume rendah (bertentangan dengan sinyal SHORT)
+            if ofi_bias == "SHORT" and ofi_strength > 0.6 and volume_ratio < 0.8:
                 return {"override": False, "priority": 0}
             return {
                 "override": True,
@@ -1776,7 +1781,12 @@ class ExtremeEnergyImbalance:
                 "reason": f"Extreme energy imbalance: down_energy {down_energy:.2f} << up_energy {up_energy:.2f} → tidak ada buyer support, bearish",
                 "priority": -218
             }
+        
+        # 🔥 Kasus: up_energy=0, down_energy > 0 -> seharusnya LONG (tidak ada seller)
         if up_energy < ENERGY_ZERO_THRESHOLD and down_energy > MIN_ENERGY_TO_MOVE:
+            # BLOCK jika OFI LONG kuat dan volume rendah (bertentangan dengan sinyal LONG)
+            if ofi_bias == "LONG" and ofi_strength > 0.6 and volume_ratio < 0.8:
+                return {"override": False, "priority": 0}
             return {
                 "override": True,
                 "bias": "LONG",
