@@ -598,6 +598,9 @@ class EmptyBookTrapDetector:
         
         # ===== CABANG LONG (bid kosong) =====
         if down_energy < 0.1 and short_dist < 2.0:
+            # 🔥 Block LONG jika overbought ekstrem (RSI6 > 90 atau RSI5m > 90)
+            if (rsi6 > 90 or rsi6_5m > 90) and volume_ratio < 1.5:
+                return {"override": False}
             # 🔥 Block LONG jika overbought ekstrem dengan OBV positif ekstrem
             if rsi6 > 75 and obv_trend == "POSITIVE_EXTREME" and volume_ratio < 0.8:
                 return {"override": False}
@@ -615,6 +618,9 @@ class EmptyBookTrapDetector:
         
         # ===== CABANG SHORT (ask kosong) =====
         if up_energy < 0.1 and long_dist < 2.0:
+            # 🔥 Block SHORT jika oversold ekstrem (RSI6 < 10 atau RSI5m < 10)
+            if (rsi6 < 10 or rsi6_5m < 10) and volume_ratio < 1.5:
+                return {"override": False}
             # 🔥 Block SHORT jika oversold ekstrem dengan OBV negatif ekstrem
             if rsi6 < 25 and obv_trend == "NEGATIVE_EXTREME" and volume_ratio < 0.8:
                 return {"override": False}
