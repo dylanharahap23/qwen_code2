@@ -645,10 +645,19 @@ class ExhaustedLiquidityReversal:
     
     NEW FILTER: Jangan reverse jika OFI bertentangan (OFI LONG kuat saat mau SHORT, atau OFI SHORT kuat saat mau LONG)
     dan volume rendah (volume_ratio < 0.7).
+    
+    🔥 NEW FILTER 2024: Jika long liq habis dan oversold ekstrem, jangan paksa LONG.
+                       Jika short liq habis dan overbought ekstrem, jangan paksa SHORT.
     """
     @staticmethod
     def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float, rsi6_5m: float,
                ofi_bias: str, ofi_strength: float) -> Dict:
+        # 🔥 NEW: Jika long liq habis dan oversold ekstrem, jangan paksa LONG
+        if long_dist < 0.5 and rsi6 < 15 and volume_ratio < 1.0:
+            return {"override": False}
+        # 🔥 NEW: Jika short liq habis dan overbought ekstrem, jangan paksa SHORT
+        if short_dist < 0.5 and rsi6 > 85 and volume_ratio < 1.0:
+            return {"override": False}
         # Short liq sangat kecil (<0.5%) dan overbought (RSI>70) dan volume rendah -> reversal ke SHORT
         if short_dist < 0.5 and rsi6 > 70 and volume_ratio < 1.0:
             # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
@@ -692,10 +701,19 @@ class NearExhaustedLiquidityReversal:
     
     NEW FILTER: Jangan reverse jika OFI bertentangan (OFI LONG kuat saat mau SHORT, atau OFI SHORT kuat saat mau LONG)
     dan volume rendah (volume_ratio < 0.7).
+    
+    🔥 NEW FILTER 2024: Jika long liq mendekati habis dan oversold ekstrem, jangan paksa LONG.
+                       Jika short liq mendekati habis dan overbought ekstrem, jangan paksa SHORT.
     """
     @staticmethod
     def detect(short_dist: float, long_dist: float, rsi6: float, volume_ratio: float, rsi6_5m: float,
                ofi_bias: str, ofi_strength: float) -> Dict:
+        # 🔥 NEW: Jika long liq mendekati habis dan oversold ekstrem, jangan paksa LONG
+        if long_dist < 1.5 and rsi6 < 15 and volume_ratio < 1.0:
+            return {"override": False}
+        # 🔥 NEW: Jika short liq mendekati habis dan overbought ekstrem, jangan paksa SHORT
+        if short_dist < 1.5 and rsi6 > 85 and volume_ratio < 1.0:
+            return {"override": False}
         # Short liq mendekati habis (<1.5%) dan overbought (RSI>70) -> reversal ke SHORT
         if short_dist < 1.5 and rsi6 > 70 and volume_ratio < 1.0:
             # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
@@ -1115,6 +1133,52 @@ class ExtremeOverboughtLongContinuation:
                 "bias": "LONG",
                 "reason": f"Extreme overbought with strong OFI LONG: RSI6 {rsi6:.1f}, volume {volume_ratio:.2f}x, OFI strength {ofi_strength:.2f} → squeeze continuation",
                 "priority": -202
+            }
+        return {"override": False}
+
+
+# ================= NEW: Oversold/Overbought False Bounce Trap =================
+class OversoldFalseBounceTrap:
+    """
+    🔥 Mendeteksi false bounce pada oversold: OFI LONG kuat tetapi harga masih turun.
+    Memaksa SHORT.
+    Priority -201.
+    """
+    @staticmethod
+    def detect(rsi6: float, volume_ratio: float, ofi_bias: str, ofi_strength: float,
+               change_5m: float, long_liq: float) -> Dict:
+        if (rsi6 < 25 and
+            volume_ratio < 0.8 and
+            ofi_bias == "LONG" and
+            ofi_strength > 0.8 and
+            change_5m < -2.0):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Oversold false bounce: RSI6 {rsi6:.1f}, volume {volume_ratio:.2f}x, strong OFI LONG {ofi_strength:.2f} but price still down {change_5m:.1f}% → dump continues",
+                "priority": -201
+            }
+        return {"override": False}
+
+class OverboughtFalseBounceTrap:
+    """
+    🔥 Mendeteksi false bounce pada overbought: OFI SHORT kuat tetapi harga masih naik.
+    Memaksa LONG.
+    Priority -201.
+    """
+    @staticmethod
+    def detect(rsi6: float, volume_ratio: float, ofi_bias: str, ofi_strength: float,
+               change_5m: float, short_liq: float) -> Dict:
+        if (rsi6 > 75 and
+            volume_ratio < 0.8 and
+            ofi_bias == "SHORT" and
+            ofi_strength > 0.8 and
+            change_5m > 2.0):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Overbought false bounce: RSI6 {rsi6:.1f}, volume {volume_ratio:.2f}x, strong OFI SHORT {ofi_strength:.2f} but price still up {change_5m:.1f}% → pump continues",
+                "priority": -201
             }
         return {"override": False}
 
@@ -3263,6 +3327,27 @@ class BinanceAnalyzer:
                             final_confidence = "ABSOLUTE"
                             final_phase = "EXTREME_OVERSOLD_CONT"
                             priority = extreme_oversold_cont["priority"]
+
+            # ========== NEW: Oversold/Overbought False Bounce Trap ==========
+            oversold_false_bounce = OversoldFalseBounceTrap.detect(
+                rsi6, volume_ratio, ofi["bias"], ofi["strength"], change_5m, liq["long_dist"]
+            )
+            if oversold_false_bounce["override"]:
+                final_bias = oversold_false_bounce["bias"]
+                final_reason = oversold_false_bounce["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "OVERSOLD_FALSE_BOUNCE"
+                priority = oversold_false_bounce["priority"]
+            else:
+                overbought_false_bounce = OverboughtFalseBounceTrap.detect(
+                    rsi6, volume_ratio, ofi["bias"], ofi["strength"], change_5m, liq["short_dist"]
+                )
+                if overbought_false_bounce["override"]:
+                    final_bias = overbought_false_bounce["bias"]
+                    final_reason = overbought_false_bounce["reason"]
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "OVERBOUGHT_FALSE_BOUNCE"
+                    priority = overbought_false_bounce["priority"]
 
             # ========== MACD DUEL OVERRIDE (WITH LECTURER'S SARAN FILTER) ==========
             if macd_decision["action"] != "NONE":
