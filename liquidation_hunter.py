@@ -956,6 +956,7 @@ class LiquidityProximityStrict:
     
     FILTER: Block jika extreme overbought/oversold dengan volume rendah
     🔥 NEW: Blokir jika arah bertentangan dengan OFI kuat
+    🔥 NEW: Blokir paksa SHORT pada oversold ekstrem, dan paksa LONG pada overbought ekstrem.
     """
     @staticmethod
     def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float,
@@ -970,6 +971,9 @@ class LiquidityProximityStrict:
                     return {"override": False}
                 if rsi6 < 20 and obv_trend == "NEGATIVE_EXTREME" and volume_ratio < 0.6:
                     return {"override": False}
+                # 🔥 Tambahan: jangan paksa LONG jika overbought ekstrem
+                if rsi6 > 80 and volume_ratio < 0.6:
+                    return {"override": False}
                 return {
                     "override": True,
                     "bias": "LONG",
@@ -980,6 +984,9 @@ class LiquidityProximityStrict:
                 if ofi_bias == "LONG" and ofi_strength > 0.7 and volume_ratio < 0.6:
                     return {"override": False}
                 if rsi6 > 80 and obv_trend == "POSITIVE_EXTREME" and volume_ratio < 0.6:
+                    return {"override": False}
+                # 🔥 Tambahan: jangan paksa SHORT jika oversold ekstrem
+                if rsi6 < 20 and volume_ratio < 0.6:
                     return {"override": False}
                 return {
                     "override": True,
