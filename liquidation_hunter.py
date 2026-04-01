@@ -955,14 +955,6 @@ class MasterSqueezeRule:
 # ================= NEW DETECTORS =================
 
 class LiquidityProximityStrict:
-    """
-    🔥 Strict liquidity override when liq distance < 2.0% and volume not crazy.
-    Priority -1050, between MasterSqueezeRule (-1100) and LiquidityMagnet (-1000).
-    
-    FILTER: Block jika extreme overbought/oversold dengan volume rendah
-    🔥 NEW: Blokir jika arah bertentangan dengan OFI kuat
-    🔥 NEW: Blokir paksa SHORT pada oversold ekstrem, dan paksa LONG pada overbought ekstrem.
-    """
     @staticmethod
     def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float,
                ofi_bias: str, ofi_strength: float, rsi6: float, obv_trend: str) -> Dict:
@@ -976,8 +968,8 @@ class LiquidityProximityStrict:
                     return {"override": False}
                 if rsi6 < 20 and obv_trend == "NEGATIVE_EXTREME" and volume_ratio < 0.6:
                     return {"override": False}
-                # 🔥 Tambahan: jangan paksa LONG jika overbought ekstrem
-                if rsi6 > 80 and volume_ratio < 0.6:
+                # 🔥 Tambahan: jangan paksa LONG jika overbought ekstrem (RSI6 > 80)
+                if rsi6 > 80:
                     return {"override": False}
                 return {
                     "override": True,
@@ -990,8 +982,8 @@ class LiquidityProximityStrict:
                     return {"override": False}
                 if rsi6 > 80 and obv_trend == "POSITIVE_EXTREME" and volume_ratio < 0.6:
                     return {"override": False}
-                # 🔥 Tambahan: jangan paksa SHORT jika oversold ekstrem
-                if rsi6 < 20 and volume_ratio < 0.6:
+                # 🔥 Tambahan: jangan paksa SHORT jika oversold ekstrem (RSI6 < 20)
+                if rsi6 < 20:
                     return {"override": False}
                 return {
                     "override": True,
