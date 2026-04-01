@@ -504,6 +504,9 @@ class OverboughtDistributionTrap:
         """
         # 🔥 EXTREME OVERBOUGHT: force SHORT regardless of liquidity proximity
         if rsi6 > 85 and volume_ratio < 0.6 and down_energy < 0.01:
+            # 🔥 Jangan paksa SHORT jika short liq sangat dekat dan OFI SHORT kuat (squeeze)
+            if short_dist < 1.0 and ofi_bias == "SHORT" and ofi_strength > 0.7:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
@@ -978,6 +981,12 @@ class LiquidityProximityStrict:
                     "priority": -1050
                 }
             if long_dist < 2.0 and long_dist < short_dist:   # akan paksa SHORT
+                # 🔥 Filter DUSDT: Jangan paksa SHORT jika oversold dan OFI LONG kuat dengan volume rendah
+                if rsi6 < 35 and ofi_bias == "LONG" and ofi_strength > 0.7 and volume_ratio < 0.7:
+                    return {"override": False}
+                # 🔥 Filter STOUSDT: Jangan paksa SHORT jika OFI netral, oversold, dan volume rendah
+                if ofi_bias == "NEUTRAL" and rsi6_5m < 35 and volume_ratio < 0.6:
+                    return {"override": False}
                 if ofi_bias == "LONG" and ofi_strength > 0.7 and volume_ratio < 0.6:
                     return {"override": False}
                 if rsi6 > 80 and obv_trend == "POSITIVE_EXTREME" and volume_ratio < 0.6:
