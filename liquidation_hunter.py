@@ -561,9 +561,14 @@ class OversoldSqueezeTrap:
         
         NEW: Tidak override jika long liq sangat dekat (<2%) dan lebih dekat dari short liq
         → liquidity mengarah SHORT, jangan LONG.
+        
+        🔥 OFI FILTER: Block jika OFI strongly SHORT dengan volume rendah
         """
         # 🔥 EXTREME OVERSOLD: force LONG regardless of liquidity proximity
         if rsi6 < 15 and volume_ratio < 0.6 and up_energy < 0.01:
+            # Block if OFI strongly SHORT (selling pressure)
+            if ofi_bias == "SHORT" and ofi_strength > 0.6 and volume_ratio < 0.6:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "LONG",
@@ -1534,8 +1539,11 @@ class OFIExtremeOversoldConfirm:
 class OversoldContinuation:
     @staticmethod
     def detect(rsi6: float, obv_trend: str, price: float, ma25: float, ma99: float,
-               volume_ratio: float, down_energy: float) -> Dict:
+               volume_ratio: float, down_energy: float, ofi_bias: str, ofi_strength: float) -> Dict:
         if rsi6 < 25 and obv_trend == "NEGATIVE_EXTREME" and price < ma25 and price < ma99 and volume_ratio < 0.8:
+            # Block jika OFI LONG kuat dan volume rendah (akan bounce)
+            if ofi_bias == "LONG" and ofi_strength > 0.6 and volume_ratio < 0.6:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
@@ -1547,8 +1555,12 @@ class OversoldContinuation:
 class OversoldBounce:
     @staticmethod
     def detect(rsi6: float, obv_trend: str, down_energy: float, long_dist: float,
-               price: float, recent_low: float, up_energy: float, ma25: float, ma99: float) -> Dict:
+               price: float, recent_low: float, up_energy: float, ma25: float, ma99: float,
+               ofi_bias: str, ofi_strength: float, volume_ratio: float) -> Dict:
         if rsi6 < 25 and obv_trend == "NEGATIVE_EXTREME" and down_energy < 0.01:
+            # Block jika OFI SHORT kuat dan volume rendah (bounce akan gagal)
+            if ofi_bias == "SHORT" and ofi_strength > 0.6 and volume_ratio < 0.6:
+                return {"override": False}
             if price < ma25 and price < ma99:
                 return {"override": False}
             if long_dist < 3.0 or (price - recent_low) / recent_low < 0.02 or up_energy > 0.1:
@@ -3041,7 +3053,7 @@ class BinanceAnalyzer:
                                                             priority = fake_energy["priority"]
                                                             prob_engine.add(fake_energy["bias"], 4.0)
                                                         else:
-                                                            oversold_cont = OversoldContinuation.detect(rsi6, obv_trend, price, ma25, ma99, volume_ratio, down_energy)
+                                                            oversold_cont = OversoldContinuation.detect(rsi6, obv_trend, price, ma25, ma99, volume_ratio, down_energy, ofi["bias"], ofi["strength"])
                                                             if oversold_cont["override"]:
                                                                 final_bias = oversold_cont["bias"]
                                                                 final_reason = oversold_cont["reason"]
@@ -3051,7 +3063,7 @@ class BinanceAnalyzer:
                                                                 prob_engine.add(oversold_cont["bias"], 3.0)
                                                             else:
                                                                 oversold_bounce = OversoldBounce.detect(rsi6, obv_trend, down_energy, liq["long_dist"],
-                                                                                                        price, liq["recent_low"], up_energy, ma25, ma99)
+                                                                                                        price, liq["recent_low"], up_energy, ma25, ma99, ofi["bias"], ofi["strength"], volume_ratio)
                                                                 if oversold_bounce["override"]:
                                                                     final_bias = oversold_bounce["bias"]
                                                                     final_reason = oversold_bounce["reason"]
@@ -3495,9 +3507,9 @@ class BinanceAnalyzer:
                     final_confidence = "ABSOLUTE"
                     final_phase = "LOW_CAP_DOUBLE_SWEEP"
                 else:
-                    # Jangan override jika volume sangat rendah dan RSI5m oversold/overbought
-                    if volume_ratio < 0.5 and (rsi6_5m < 30 or rsi6_5m > 70):
-                        final_reason += f" | Low cap but extreme RSI5m ({rsi6_5m:.1f}) → skip liquidity override"
+                    # 🔥 Jangan override jika extreme oversold/overbought dengan volume rendah
+                    if volume_ratio < 0.6 and (rsi6 < 20 or rsi6 > 80):
+                        final_reason += f" | Low cap but extreme RSI6 ({rsi6:.1f}) with low volume → skip liquidity override"
                     else:
                         if liq["short_dist"] < liq["long_dist"]:
                             if final_bias != "LONG":
