@@ -974,6 +974,12 @@ class LiquidityProximityStrict:
                 # 🔥 Tambahan: jangan paksa LONG jika overbought ekstrem (RSI6 > 80)
                 if rsi6 > 80:
                     return {"override": False}
+                # 🔥 Filter baru: Jika overbought dan OFI SHORT kuat, jangan paksa LONG (potensi dump)
+                if rsi6 > 65 and ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.7:
+                    return {"override": False}
+                # 🔥 Filter baru: Jika overbought ekstrem (rsi6 > 80) dan volume rendah, jangan paksa LONG
+                if rsi6 > 80 and volume_ratio < 0.6:
+                    return {"override": False}
                 return {
                     "override": True,
                     "bias": "LONG",
@@ -993,6 +999,15 @@ class LiquidityProximityStrict:
                     return {"override": False}
                 # 🔥 Tambahan: jangan paksa SHORT jika oversold ekstrem (RSI6 < 20)
                 if rsi6 < 20:
+                    return {"override": False}
+                # 🔥 Filter baru: Jika oversold dan OFI LONG kuat, jangan paksa SHORT (potensi bounce)
+                if rsi6 < 35 and ofi_bias == "LONG" and ofi_strength > 0.7 and volume_ratio < 0.7:
+                    return {"override": False}
+                # 🔥 Filter baru: Jika oversold ekstrem (rsi6 < 25) dan volume rendah, jangan paksa SHORT
+                if rsi6 < 25 and volume_ratio < 0.6:
+                    return {"override": False}
+                # 🔥 Filter baru: Jika oversold (rsi6 < 35) dan OFI SHORT kuat, jangan paksa SHORT (potensi reversal)
+                if rsi6 < 35 and ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.7:
                     return {"override": False}
                 return {
                     "override": True,
@@ -1663,7 +1678,8 @@ class LiquidityPriorityEnergyCheck:
 
 class LiquidityPriorityOverride:
     @staticmethod
-    def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float) -> Dict:
+    def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float,
+               rsi6: float, ofi_bias: str, ofi_strength: float) -> Dict:
         if volume_ratio < 0.5:
             return {
                 "override": False,
@@ -1676,6 +1692,9 @@ class LiquidityPriorityOverride:
         
         CLOSE_LIQ_THRESHOLD = 1.5
         if short_dist < CLOSE_LIQ_THRESHOLD and short_dist < long_dist:
+            # 🔥 Jika overbought dan OFI SHORT kuat, jangan paksa LONG (potensi dump)
+            if rsi6 > 65 and ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.7:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "LONG",
@@ -1683,6 +1702,18 @@ class LiquidityPriorityOverride:
                 "priority": -220
             }
         if long_dist < CLOSE_LIQ_THRESHOLD and long_dist < short_dist:
+            # 🔥 Jika oversold dan OFI LONG kuat, jangan paksa SHORT (potensi bounce)
+            if rsi6 < 35 and ofi_bias == "LONG" and ofi_strength > 0.7 and volume_ratio < 0.7:
+                return {"override": False}
+            # 🔥 Jika oversold ekstrem (rsi6 < 25) dan volume rendah, jangan paksa SHORT
+            if rsi6 < 25 and volume_ratio < 0.6:
+                return {"override": False}
+            # 🔥 Jika long liq sangat dekat dan OFI SHORT kuat, jangan paksa SHORT (potensi squeeze)
+            if long_dist < 2.5 and ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.7:
+                return {"override": False}
+            # 🔥 Jika oversold (rsi6 < 35) dan OFI SHORT kuat, jangan paksa SHORT (potensi reversal)
+            if rsi6 < 35 and ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.7:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
@@ -3140,7 +3171,10 @@ class BinanceAnalyzer:
                                                                                         priority = overbought_trap_old["priority"]
                                                                                         prob_engine.add(overbought_trap_old["bias"], 3.0)
                                                                                     else:
-                                                                                        liq_priority = LiquidityPriorityOverride.detect(liq["short_dist"], liq["long_dist"], volume_ratio, rsi6_5m)
+                                                                                        liq_priority = LiquidityPriorityOverride.detect(
+                                                                                            liq["short_dist"], liq["long_dist"], volume_ratio, rsi6_5m,
+                                                                                            rsi6, ofi["bias"], ofi["strength"]
+                                                                                        )
                                                                                         if liq_priority["override"]:
                                                                                             bait = LiquidityBaitDetector.detect(liq["short_dist"], liq["long_dist"],
                                                                                                                                 up_energy, down_energy, agg, flow, volume_ratio)
