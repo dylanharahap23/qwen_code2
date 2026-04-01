@@ -1171,6 +1171,12 @@ class OversoldFalseBounceTrap:
             ofi_bias == "LONG" and
             ofi_strength > 0.8 and
             change_5m < -2.0):
+            # 🔥 Jika long liq sangat dekat, ini potensi short squeeze → jangan paksa SHORT
+            if long_liq < 2.0:
+                return {"override": False}
+            # 🔥 Jika harga sudah turun sangat dalam (>5%), ini exhaustion → jangan paksa SHORT
+            if change_5m < -5.0:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
@@ -1193,6 +1199,11 @@ class OverboughtFalseBounceTrap:
             ofi_bias == "SHORT" and
             ofi_strength > 0.8 and
             change_5m > 2.0):
+            # 🔥 Jika short liq sangat dekat, ini potensi short squeeze → jangan paksa LONG
+            if short_liq < 2.0:
+                return {"override": False}
+            if change_5m > 5.0:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "LONG",
