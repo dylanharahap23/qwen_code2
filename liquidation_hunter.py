@@ -639,8 +639,8 @@ class ExhaustedLiquidityReversal:
     Overrides forced LONG when short liq is too small (<0.5%) and overbought.
     Priority -1060 (between MasterSqueeze -1100 and StrictLiquidity -1050)
     
-    FILTER: Jangan reverse jika volume sangat rendah (volume_ratio < 0.6) dan 
-    RSI 5m overbought/oversold ekstrem (rsi6_5m > 70 untuk SHORT, atau rsi6_5m < 30 untuk LONG)
+    FILTER: Jangan reverse jika volume sangat rendah (volume_ratio < 0.7) dan 
+    RSI 5m overbought/oversold sedang (rsi6_5m > 60 untuk SHORT, atau rsi6_5m < 40 untuk LONG)
     → squeeze continuation akan tetap berjalan, bukan di‑reverse.
     
     NEW FILTER: Jangan reverse jika OFI bertentangan (OFI LONG kuat saat mau SHORT, atau OFI SHORT kuat saat mau LONG)
@@ -660,10 +660,10 @@ class ExhaustedLiquidityReversal:
             return {"override": False}
         # Short liq sangat kecil (<0.5%) dan overbought (RSI>70) dan volume rendah -> reversal ke SHORT
         if short_dist < 0.5 and rsi6 > 70 and volume_ratio < 1.0:
-            # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m > 65:
+            # Jangan reverse jika overbought dan volume sangat rendah (masih squeeze)
+            if volume_ratio < 0.7 and rsi6_5m > 60:
                 return {"override": False}
-            # 🔥 Filter 2: OFI bertentangan (OFI LONG kuat) dan volume rendah
+            # Filter OFI bertentangan (OFI LONG kuat) dan volume rendah
             if volume_ratio < 0.7 and ofi_bias == "LONG" and ofi_strength > 0.6:
                 return {"override": False}
             return {
@@ -674,10 +674,10 @@ class ExhaustedLiquidityReversal:
             }
         # Mirror untuk long liq exhausted dengan oversold
         if long_dist < 0.5 and rsi6 < 30 and volume_ratio < 1.0:
-            # Jangan reverse jika oversold ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m < 35:
+            # Jangan reverse jika oversold dan volume sangat rendah (masih squeeze)
+            if volume_ratio < 0.7 and rsi6_5m < 40:
                 return {"override": False}
-            # 🔥 Filter 2: OFI bertentangan (OFI SHORT kuat) dan volume rendah
+            # Filter OFI bertentangan (OFI SHORT kuat) dan volume rendah
             if volume_ratio < 0.7 and ofi_bias == "SHORT" and ofi_strength > 0.6:
                 return {"override": False}
             return {
@@ -695,8 +695,8 @@ class NearExhaustedLiquidityReversal:
     Overrides strict liquidity to prevent forced LONG when short liq is almost gone.
     Priority -1055 (between ExhaustedLiquidityReversal -1060 and StrictLiquidityProximity -1050)
     
-    FILTER: Jangan reverse jika volume sangat rendah (volume_ratio < 0.6) dan 
-    RSI 5m overbought/oversold ekstrem (rsi6_5m > 70 untuk SHORT, atau rsi6_5m < 30 untuk LONG)
+    FILTER: Jangan reverse jika volume sangat rendah (volume_ratio < 0.7) dan 
+    RSI 5m overbought/oversold sedang (rsi6_5m > 60 untuk SHORT, atau rsi6_5m < 40 untuk LONG)
     → squeeze continuation akan tetap berjalan, bukan di‑reverse.
     
     NEW FILTER: Jangan reverse jika OFI bertentangan (OFI LONG kuat saat mau SHORT, atau OFI SHORT kuat saat mau LONG)
@@ -716,10 +716,10 @@ class NearExhaustedLiquidityReversal:
             return {"override": False}
         # Short liq mendekati habis (<1.5%) dan overbought (RSI>70) -> reversal ke SHORT
         if short_dist < 1.5 and rsi6 > 70 and volume_ratio < 1.0:
-            # Jangan reverse jika overbought ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m > 65:
+            # Jangan reverse jika overbought dan volume sangat rendah (masih squeeze)
+            if volume_ratio < 0.7 and rsi6_5m > 60:
                 return {"override": False}
-            # 🔥 Filter 2: OFI bertentangan (OFI LONG kuat) dan volume rendah
+            # Filter OFI bertentangan (OFI LONG kuat) dan volume rendah
             if volume_ratio < 0.7 and ofi_bias == "LONG" and ofi_strength > 0.6:
                 return {"override": False}
             return {
@@ -730,10 +730,10 @@ class NearExhaustedLiquidityReversal:
             }
         # Long liq mendekati habis (<1.5%) dan oversold (RSI<30) -> reversal ke LONG
         if long_dist < 1.5 and rsi6 < 30 and volume_ratio < 1.0:
-            # Jangan reverse jika oversold ekstrem dan volume sangat rendah (masih squeeze)
-            if volume_ratio < 0.6 and rsi6_5m < 35:
+            # Jangan reverse jika oversold dan volume sangat rendah (masih squeeze)
+            if volume_ratio < 0.7 and rsi6_5m < 40:
                 return {"override": False}
-            # 🔥 Filter 2: OFI bertentangan (OFI SHORT kuat) dan volume rendah
+            # Filter OFI bertentangan (OFI SHORT kuat) dan volume rendah
             if volume_ratio < 0.7 and ofi_bias == "SHORT" and ofi_strength > 0.6:
                 return {"override": False}
             return {
