@@ -1464,6 +1464,66 @@ class ExtremeOverboughtDistribution:
         return {"override": False}
 
 
+class TrappedShortSqueeze:
+    """
+    🔥 Mendeteksi short squeeze ketika OFI SHORT kuat tapi tidak ada sell wall.
+    OFI SHORT dengan down_energy=0, volume rendah, short liq lebih dekat
+    → short sellers trapped, harga akan naik untuk menyapu stop loss mereka.
+    Priority -160 (lebih tinggi dari OFI dominance -145)
+    """
+    @staticmethod
+    def detect(ofi_bias: str, ofi_strength: float, down_energy: float,
+               up_energy: float, volume_ratio: float, short_liq: float,
+               long_liq: float, change_5m: float) -> Dict:
+        # Syarat:
+        # 1. OFI SHORT kuat (>0.6)
+        # 2. Volume rendah (<0.7)
+        # 3. Tidak ada sell wall (down_energy < 0.01)
+        # 4. Ada buy pressure (up_energy > 0.1)
+        # 5. Short liq lebih dekat dari long liq (short_liq < long_liq)
+        # 6. Harga sudah naik dalam 5m (change_5m > 1.0) -> konfirmasi uptrend
+        if (ofi_bias == "SHORT" and
+            ofi_strength > 0.6 and
+            volume_ratio < 0.7 and
+            down_energy < 0.01 and
+            up_energy > 0.1 and
+            short_liq < long_liq and
+            change_5m > 1.0):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Trapped short squeeze: OFI SHORT {ofi_strength:.2f} with low volume ({volume_ratio:.2f}x), no sellers (down_energy=0), short liq {short_liq:.2f}% < long liq {long_liq:.2f}% → short sellers trapped, squeeze up",
+                "priority": -160
+            }
+        return {"override": False}
+
+
+class TrappedLongSqueeze:
+    """
+    🔥 Mirror: OFI LONG kuat tapi tidak ada buy wall, long liq lebih dekat
+    → long sellers trapped, harga akan turun.
+    Priority -160.
+    """
+    @staticmethod
+    def detect(ofi_bias: str, ofi_strength: float, up_energy: float,
+               down_energy: float, volume_ratio: float, short_liq: float,
+               long_liq: float, change_5m: float) -> Dict:
+        if (ofi_bias == "LONG" and
+            ofi_strength > 0.6 and
+            volume_ratio < 0.7 and
+            up_energy < 0.01 and
+            down_energy > 0.1 and
+            long_liq < short_liq and
+            change_5m < -1.0):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Trapped long squeeze: OFI LONG {ofi_strength:.2f} with low volume, no buyers, long liq closer → long sellers trapped, dump down",
+                "priority": -160
+            }
+        return {"override": False}
+
+
 # ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
 class SqueezeContinuationDetector:
     @staticmethod
@@ -3779,6 +3839,32 @@ class BinanceAnalyzer:
                 final_confidence = "ABSOLUTE"
                 final_phase = "EXTREME_OVERBOUGHT_DIST"
                 priority = extreme_overbought_dist["priority"]
+
+            # ========== TRAPPED SHORT SQUEEZE (Priority -160) ==========
+            trapped_short = TrappedShortSqueeze.detect(
+                ofi["bias"], ofi["strength"], down_energy,
+                up_energy, volume_ratio, liq["short_dist"],
+                liq["long_dist"], change_5m
+            )
+            if trapped_short["override"]:
+                final_bias = trapped_short["bias"]
+                final_reason = trapped_short["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "TRAPPED_SHORT_SQUEEZE"
+                priority = trapped_short["priority"]
+            else:
+                # ========== TRAPPED LONG SQUEEZE (Mirror, Priority -160) ==========
+                trapped_long = TrappedLongSqueeze.detect(
+                    ofi["bias"], ofi["strength"], up_energy,
+                    down_energy, volume_ratio, liq["short_dist"],
+                    liq["long_dist"], change_5m
+                )
+                if trapped_long["override"]:
+                    final_bias = trapped_long["bias"]
+                    final_reason = trapped_long["reason"]
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "TRAPPED_LONG_SQUEEZE"
+                    priority = trapped_long["priority"]
 
             # ========== NEW: Oversold/Overbought False Bounce Trap ==========
             oversold_false_bounce = OversoldFalseBounceTrap.detect(
