@@ -1843,6 +1843,12 @@ class ExtremeEnergyImbalance:
             # 🔥 BLOCK jika OFI SHORT kuat dan volume rendah (bertentangan dengan sinyal SHORT)
             if ofi_bias == "SHORT" and ofi_strength > 0.6 and volume_ratio < 0.8:
                 return {"override": False, "priority": 0}
+            # 🔥 NEW: Jangan paksa SHORT jika oversold (rsi6 < 35) dan volume tidak tinggi, apalagi harga sudah turun
+            if rsi6 < 35 and volume_ratio < 0.8 and price_change_5m < 0:
+                return {"override": False, "priority": 0}
+            # 🔥 NEW: Jangan paksa SHORT jika rsi6_5m rendah (<40) dan volume_ratio < 0.8 (potensi bounce)
+            if rsi6_5m < 40 and volume_ratio < 0.8:
+                return {"override": False, "priority": 0}
             return {
                 "override": True,
                 "bias": "SHORT",
