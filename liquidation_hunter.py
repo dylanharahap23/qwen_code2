@@ -1338,6 +1338,27 @@ class AbsorptionReversalOverride:
         return {"override": False}
 
 
+class OversoldLiquidityBounce:
+    """
+    🔥 Memaksa LONG pada oversold (RSI6_5m < 30), volume rendah (<0.6),
+    long liq dekat (<5%), dan down_energy = 0.
+    Priority -138 (antara absorption reversal dan OFI dominance).
+    """
+    @staticmethod
+    def detect(rsi6_5m: float, volume_ratio: float, long_liq: float, down_energy: float) -> Dict:
+        if (rsi6_5m < 30 and
+            volume_ratio < 0.6 and
+            long_liq < 5.0 and
+            down_energy < 0.01):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Oversold liquidity bounce (5m): RSI5m {rsi6_5m:.1f}, volume {volume_ratio:.2f}x, long liq {long_liq:.2f}%, no sellers → bounce likely",
+                "priority": -138
+            }
+        return {"override": False}
+
+
 # ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
 class SqueezeContinuationDetector:
     @staticmethod
@@ -3592,6 +3613,17 @@ class BinanceAnalyzer:
                 final_confidence = "ABSOLUTE"
                 final_phase = "ABSORPTION_REVERSAL"
                 priority = absorption_reversal["priority"]
+
+            # ========== OVERSOLD LIQUIDITY BOUNCE ==========
+            oversold_liquidity_bounce = OversoldLiquidityBounce.detect(
+                rsi6_5m, volume_ratio, liq["long_dist"], down_energy
+            )
+            if oversold_liquidity_bounce["override"]:
+                final_bias = oversold_liquidity_bounce["bias"]
+                final_reason = oversold_liquidity_bounce["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "OVERSOLD_LIQUIDITY_BOUNCE"
+                priority = oversold_liquidity_bounce["priority"]
 
             # ========== NEW: Oversold/Overbought False Bounce Trap ==========
             oversold_false_bounce = OversoldFalseBounceTrap.detect(
