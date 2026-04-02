@@ -1216,6 +1216,50 @@ class OverboughtFalseBounceTrap:
         return {"override": False}
 
 
+# ================= NEW: EXTREME OVERSOLD/OVERBOUGHT BOUNCE/DUMP OVERRIDE =================
+class ExtremeOversoldBounceOverride:
+    """
+    🔥 Memaksa LONG pada oversold ekstrem dengan OFI LONG kuat dan harga sudah turun dalam.
+    Priority -150 (cukup tinggi untuk mengalahkan voting/probabilistic).
+    """
+    @staticmethod
+    def detect(rsi6: float, volume_ratio: float, change_5m: float,
+               ofi_bias: str, ofi_strength: float, long_liq: float) -> Dict:
+        if (rsi6 < 25 and
+            volume_ratio < 0.8 and
+            change_5m < -5.0 and
+            ofi_bias == "LONG" and
+            ofi_strength > 0.7):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Extreme oversold with strong OFI LONG: price down {change_5m:.1f}%, RSI {rsi6:.1f}, volume {volume_ratio:.2f}x → bounce imminent",
+                "priority": -150
+            }
+        return {"override": False}
+
+class ExtremeOverboughtDumpOverride:
+    """
+    🔥 Memaksa SHORT pada overbought ekstrem dengan OFI SHORT kuat dan harga sudah naik dalam.
+    Priority -150 (simetris).
+    """
+    @staticmethod
+    def detect(rsi6: float, volume_ratio: float, change_5m: float,
+               ofi_bias: str, ofi_strength: float, short_liq: float) -> Dict:
+        if (rsi6 > 75 and
+            volume_ratio < 0.8 and
+            change_5m > 5.0 and
+            ofi_bias == "SHORT" and
+            ofi_strength > 0.7):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Extreme overbought with strong OFI SHORT: price up {change_5m:.1f}%, RSI {rsi6:.1f}, volume {volume_ratio:.2f}x → dump imminent",
+                "priority": -150
+            }
+        return {"override": False}
+
+
 # ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
 class SqueezeContinuationDetector:
     @staticmethod
@@ -3414,6 +3458,27 @@ class BinanceAnalyzer:
                             final_confidence = "ABSOLUTE"
                             final_phase = "EXTREME_OVERSOLD_CONT"
                             priority = extreme_oversold_cont["priority"]
+
+            # ========== NEW: EXTREME OVERSOLD/OVERBOUGHT BOUNCE/DUMP OVERRIDE ==========
+            extreme_oversold_bounce = ExtremeOversoldBounceOverride.detect(
+                rsi6, volume_ratio, change_5m, ofi["bias"], ofi["strength"], liq["long_dist"]
+            )
+            if extreme_oversold_bounce["override"]:
+                final_bias = extreme_oversold_bounce["bias"]
+                final_reason = extreme_oversold_bounce["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "EXTREME_OVERSOLD_BOUNCE"
+                priority = extreme_oversold_bounce["priority"]
+            else:
+                extreme_overbought_dump = ExtremeOverboughtDumpOverride.detect(
+                    rsi6, volume_ratio, change_5m, ofi["bias"], ofi["strength"], liq["short_dist"]
+                )
+                if extreme_overbought_dump["override"]:
+                    final_bias = extreme_overbought_dump["bias"]
+                    final_reason = extreme_overbought_dump["reason"]
+                    final_confidence = "ABSOLUTE"
+                    final_phase = "EXTREME_OVERBOUGHT_DUMP"
+                    priority = extreme_overbought_dump["priority"]
 
             # ========== NEW: Oversold/Overbought False Bounce Trap ==========
             oversold_false_bounce = OversoldFalseBounceTrap.detect(
