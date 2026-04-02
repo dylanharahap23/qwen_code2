@@ -616,7 +616,8 @@ class OversoldSqueezeTrap:
 class EmptyBookTrapDetector:
     @staticmethod
     def detect(down_energy: float, up_energy: float, short_dist: float, long_dist: float,
-               rsi6_5m: float, volume_ratio: float, obv_trend: str, rsi6: float) -> Dict:
+               rsi6_5m: float, volume_ratio: float, obv_trend: str, rsi6: float,
+               ofi_bias: str, ofi_strength: float) -> Dict:
         # Jika short liq sudah sangat dekat (<0.5%), squeeze sudah habis → jangan override LONG
         if short_dist < 0.5:
             return {"override": False}
@@ -2885,7 +2886,8 @@ class BinanceAnalyzer:
                     hft_6pct = {"bias": "NEUTRAL", "reason": ""}
                 else:
                     empty_book = EmptyBookTrapDetector.detect(down_energy, up_energy, liq["short_dist"], liq["long_dist"],
-                                                              rsi6_5m, volume_ratio, obv_trend, rsi6)
+                                                              rsi6_5m, volume_ratio, obv_trend, rsi6,
+                                                              ofi["bias"], ofi["strength"])
                     if empty_book["override"]:
                         final_bias = empty_book["bias"]
                         final_reason = empty_book["reason"]
