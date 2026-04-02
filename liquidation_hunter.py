@@ -960,7 +960,7 @@ class MasterSqueezeRule:
 class LiquidityProximityStrict:
     @staticmethod
     def detect(short_dist: float, long_dist: float, volume_ratio: float, rsi6_5m: float,
-               ofi_bias: str, ofi_strength: float, rsi6: float, obv_trend: str) -> Dict:
+               ofi_bias: str, ofi_strength: float, rsi6: float, obv_trend: str, change_5m: float) -> Dict:
         if volume_ratio < 1.5:
             # 🔥 Block jika extreme overbought/oversold dengan volume rendah
             if (rsi6_5m > 70 and volume_ratio < 0.6) or (rsi6_5m < 30 and volume_ratio < 0.6):
@@ -971,14 +971,9 @@ class LiquidityProximityStrict:
                     return {"override": False}
                 if rsi6 < 20 and obv_trend == "NEGATIVE_EXTREME" and volume_ratio < 0.6:
                     return {"override": False}
-                # 🔥 Tambahan: jangan paksa LONG jika overbought ekstrem (RSI6 > 80)
                 if rsi6 > 80:
                     return {"override": False}
-                # 🔥 Filter baru: Jika overbought dan OFI SHORT kuat, jangan paksa LONG (potensi dump)
                 if rsi6 > 65 and ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.7:
-                    return {"override": False}
-                # 🔥 Filter baru: Jika overbought ekstrem (rsi6 > 80) dan volume rendah, jangan paksa LONG
-                if rsi6 > 80 and volume_ratio < 0.6:
                     return {"override": False}
                 return {
                     "override": True,
@@ -993,21 +988,14 @@ class LiquidityProximityStrict:
                 # 🔥 Filter STOUSDT: Jangan paksa SHORT jika OFI netral, oversold, dan volume rendah
                 if ofi_bias == "NEUTRAL" and rsi6_5m < 35 and volume_ratio < 0.6:
                     return {"override": False}
+                # 🔥 Filter STOUSDT (lanjutan): Jangan paksa SHORT jika oversold, volume rendah, OFI tidak kuat, dan harga sudah turun
+                if rsi6 < 35 and volume_ratio < 0.6 and ofi_strength < 0.5 and change_5m < -1.0:
+                    return {"override": False}
                 if ofi_bias == "LONG" and ofi_strength > 0.7 and volume_ratio < 0.6:
                     return {"override": False}
                 if rsi6 > 80 and obv_trend == "POSITIVE_EXTREME" and volume_ratio < 0.6:
                     return {"override": False}
-                # 🔥 Tambahan: jangan paksa SHORT jika oversold ekstrem (RSI6 < 20)
                 if rsi6 < 20:
-                    return {"override": False}
-                # 🔥 Filter baru: Jika oversold dan OFI LONG kuat, jangan paksa SHORT (potensi bounce)
-                if rsi6 < 35 and ofi_bias == "LONG" and ofi_strength > 0.7 and volume_ratio < 0.7:
-                    return {"override": False}
-                # 🔥 Filter baru: Jika oversold ekstrem (rsi6 < 25) dan volume rendah, jangan paksa SHORT
-                if rsi6 < 25 and volume_ratio < 0.6:
-                    return {"override": False}
-                # 🔥 Filter baru: Jika oversold (rsi6 < 35) dan OFI SHORT kuat, jangan paksa SHORT (potensi reversal)
-                if rsi6 < 35 and ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.7:
                     return {"override": False}
                 return {
                     "override": True,
@@ -2890,7 +2878,7 @@ class BinanceAnalyzer:
                                     # 1.7. STRICT LIQUIDITY PROXIMITY (Priority -1050)
                                     strict_liq = LiquidityProximityStrict.detect(
                                         liq["short_dist"], liq["long_dist"], volume_ratio, rsi6_5m,
-                                        ofi["bias"], ofi["strength"], rsi6, obv_trend
+                                        ofi["bias"], ofi["strength"], rsi6, obv_trend, change_5m
                                     )
                                     if strict_liq["override"]:
                                         final_bias = strict_liq["bias"]
