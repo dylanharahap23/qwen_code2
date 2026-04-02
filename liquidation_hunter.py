@@ -1434,6 +1434,36 @@ class OversoldLiquidityContinuation:
         return {"override": False}
 
 
+class ExtremeOverboughtDistribution:
+    """
+    🔥 DETECTS EXTREME OVERBOUGHT DISTRIBUTION
+    RSI5m > 90, volume low, OFI LONG strong, up_energy near zero
+    → smart money distributing, dump imminent
+    Priority -270 (higher than normal OverboughtDistributionTrap -261)
+    """
+    @staticmethod
+    def detect(rsi6: float, rsi6_5m: float, volume_ratio: float, 
+               ofi_bias: str, ofi_strength: float, up_energy: float,
+               short_liq: float, change_5m: float) -> Dict:
+        # Pastikan bukan short squeeze (short liq harus jauh > 1.5%)
+        if short_liq < 1.5:
+            return {"override": False}  # Bisa jadi short squeeze, jangan SHORT
+        
+        if (rsi6_5m > 90 and
+            rsi6 > 70 and
+            volume_ratio < 0.9 and
+            ofi_bias == "LONG" and
+            ofi_strength > 0.7 and
+            up_energy < 0.1):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Extreme overbought distribution: RSI5m {rsi6_5m:.1f} > 90, volume {volume_ratio:.2f}x, OFI LONG {ofi_strength:.2f}, up_energy={up_energy:.2f} → smart money distributing, dump incoming",
+                "priority": -270
+            }
+        return {"override": False}
+
+
 # ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
 class SqueezeContinuationDetector:
     @staticmethod
@@ -3737,6 +3767,19 @@ class BinanceAnalyzer:
                 final_phase = "OVERSOLD_LIQUIDITY_CONT"
                 priority = oversold_liquidity_cont["priority"]
 
+            # ========== EXTREME OVERBOUGHT DISTRIBUTION (PRIORITY -270) ==========
+            extreme_overbought_dist = ExtremeOverboughtDistribution.detect(
+                rsi6, rsi6_5m, volume_ratio,
+                ofi["bias"], ofi["strength"], up_energy,
+                liq["short_dist"], change_5m
+            )
+            if extreme_overbought_dist["override"]:
+                final_bias = extreme_overbought_dist["bias"]
+                final_reason = extreme_overbought_dist["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "EXTREME_OVERBOUGHT_DIST"
+                priority = extreme_overbought_dist["priority"]
+
             # ========== NEW: Oversold/Overbought False Bounce Trap ==========
             oversold_false_bounce = OversoldFalseBounceTrap.detect(
                 rsi6, volume_ratio, ofi["bias"], ofi["strength"], change_5m, liq["long_dist"]
@@ -3848,38 +3891,45 @@ class BinanceAnalyzer:
             # ========== FIXED Volume Filter: Jangan reverse jika bias sudah searah liquidity atau sinyal HFT/Algo kuat ==========
             if final_bias in ["LONG", "SHORT"] and len(volumes_1m) >= 10:
                 if latest_volume < volume_ma10:
-                    # Tentukan arah liquidity
-                    liquidity_bias = "LONG" if liq["short_dist"] < liq["long_dist"] else "SHORT"
-                    # Cek apakah HFT dan Algo Type konsisten (sama dan tidak netral)
-                    hft_algo_agree = (hft_6pct["bias"] == algo_type["bias"] and hft_6pct["bias"] != "NEUTRAL")
-                    # Gabungkan dengan sinyal kuat yang sudah ada
-                    is_strong = self._is_strong_signal(ofi, up_energy, down_energy, change_5m, rsi6) or hft_algo_agree
-
-                    # --- Tambahan: jika volume sangat rendah dan RSI 5m oversold/overbought, jangan reverse ---
-                    if volume_ratio < 0.5 and (rsi6_5m < 30 or rsi6_5m > 70):
-                        is_strong = True   # Anggap sinyal kuat, jangan reverse
-                        final_reason += f" | Very low volume with extreme RSI5m ({rsi6_5m:.1f}) → holding"
-                    # ------------------------------------------------------------------------
-
-                    # Jangan reverse jika ada sinyal kuat
-                    if is_strong:
-                        final_reason += f" | Volume low but strong signal (HFT+Algo agree) → holding"
-                    # Jangan reverse jika bias sudah searah liquidity
-                    elif final_bias == liquidity_bias:
-                        final_reason += f" | Volume low but aligned with liquidity ({liquidity_bias}) → holding"
+                    # 🔥 JANGAN REVERSE jika priority tinggi (< -250): trap signals dengan prioritas sangat tinggi
+                    if priority < -250:
+                        final_reason += f" | High priority signal (priority {priority}) → volume filter bypassed"
+                        # Skip reverse, tetap pakai bias original
                     else:
-                        # Deteksi apakah di zona squeeze (likuiditas dekat)
-                        is_near_liquidity = liq["short_dist"] < LIQ_SQUEEZE_THRESHOLD or liq["long_dist"] < LIQ_SQUEEZE_THRESHOLD
-                        if not is_near_liquidity:
-                            original_bias = final_bias
-                            final_bias = "LONG" if original_bias == "SHORT" else "SHORT"
-                            final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} → reverse from {original_bias} to {final_bias}"
-                            final_confidence = "ABSOLUTE"
-                            final_phase = "VOLUME_FILTER_REVERSE"
+                        # Tentukan arah liquidity
+                        liquidity_bias = "LONG" if liq["short_dist"] < liq["long_dist"] else "SHORT"
+                        # Cek apakah HFT dan Algo Type konsisten (sama dan TIDAK NEUTRAL)
+                        hft_algo_agree = (hft_6pct["bias"] == algo_type["bias"] and 
+                                          hft_6pct["bias"] != "NEUTRAL" and 
+                                          algo_type["bias"] != "NEUTRAL")
+                        # Gabungkan dengan sinyal kuat yang sudah ada
+                        is_strong = self._is_strong_signal(ofi, up_energy, down_energy, change_5m, rsi6) or hft_algo_agree
+
+                        # --- Tambahan: jika volume sangat rendah dan RSI 5m oversold/overbought, jangan reverse ---
+                        if volume_ratio < 0.5 and (rsi6_5m < 30 or rsi6_5m > 70):
+                            is_strong = True   # Anggap sinyal kuat, jangan reverse
+                            final_reason += f" | Very low volume with extreme RSI5m ({rsi6_5m:.1f}) → holding"
+                        # ------------------------------------------------------------------------
+
+                        # Jangan reverse jika ada sinyal kuat
+                        if is_strong:
+                            final_reason += f" | Volume low but strong signal (HFT+Algo agree) → holding"
+                        # Jangan reverse jika bias sudah searah liquidity
+                        elif final_bias == liquidity_bias:
+                            final_reason += f" | Volume low but aligned with liquidity ({liquidity_bias}) → holding"
                         else:
-                            final_reason += f" | Volume Low but Near Liquidity ({liq['short_dist']}%/{liq['long_dist']}%) → Hold Squeeze Bias"
-                            if final_confidence == "ABSOLUTE":
-                                final_confidence = "HIGH"
+                            # Deteksi apakah di zona squeeze (likuiditas dekat)
+                            is_near_liquidity = liq["short_dist"] < LIQ_SQUEEZE_THRESHOLD or liq["long_dist"] < LIQ_SQUEEZE_THRESHOLD
+                            if not is_near_liquidity:
+                                original_bias = final_bias
+                                final_bias = "LONG" if original_bias == "SHORT" else "SHORT"
+                                final_reason += f" | Volume {latest_volume:.2f} < MA10 {volume_ma10:.2f} → reverse from {original_bias} to {final_bias}"
+                                final_confidence = "ABSOLUTE"
+                                final_phase = "VOLUME_FILTER_REVERSE"
+                            else:
+                                final_reason += f" | Volume Low but Near Liquidity ({liq['short_dist']}%/{liq['long_dist']}%) → Hold Squeeze Bias"
+                                if final_confidence == "ABSOLUTE":
+                                    final_confidence = "HIGH"
                 else:
                     # Jika volume tidak rendah, hanya beri warning jika perlu
                     final_reason += f" | Volume {latest_volume:.2f} >= MA10 {volume_ma10:.2f} (normal)"
