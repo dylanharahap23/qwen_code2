@@ -1554,7 +1554,11 @@ class OFIExtremeOversoldConfirm:
 class OversoldContinuation:
     @staticmethod
     def detect(rsi6: float, obv_trend: str, price: float, ma25: float, ma99: float,
-               volume_ratio: float, down_energy: float, ofi_bias: str, ofi_strength: float) -> Dict:
+               volume_ratio: float, down_energy: float, ofi_bias: str, ofi_strength: float,
+               long_dist: float) -> Dict:
+        # 🔥 Jangan paksa SHORT jika long liq sangat dekat dan volume rendah (potensi short squeeze / bounce)
+        if long_dist < 1.5 and volume_ratio < 0.7:
+            return {"override": False}
         if rsi6 < 25 and obv_trend == "NEGATIVE_EXTREME" and price < ma25 and price < ma99 and volume_ratio < 0.8:
             # Block jika OFI LONG kuat dan volume rendah (akan bounce)
             if ofi_bias == "LONG" and ofi_strength > 0.6 and volume_ratio < 0.6:
@@ -1749,12 +1753,20 @@ class LiquidityEnergyCheck:
 class OverboughtLiquidityTrap:
     @staticmethod
     def detect(short_dist: float, long_dist: float, rsi6: float, up_energy: float, down_energy: float,
-               ofi_bias: str, ofi_strength: float, volume_ratio: float) -> Dict:
+               ofi_bias: str, ofi_strength: float, volume_ratio: float, funding_rate: float) -> Dict:
         CLOSE_LIQ = 1.5
 
         if volume_ratio < 0.6:
             return {"override": False, "priority": 0}
-
+        
+        # 🔥 Jangan paksa LONG jika overbought ekstrem dan volume tidak terlalu tinggi (exhaustion)
+        if rsi6 > 90 and volume_ratio < 0.9:
+            return {"override": False, "priority": 0}
+        
+        # 🔥 Jika funding rate sangat negatif dan overbought ekstrem, jangan paksa LONG (exhaustion / short trap gagal)
+        if rsi6 > 85 and funding_rate < -0.005 and volume_ratio < 1.0:
+            return {"override": False}
+        
         if (short_dist < CLOSE_LIQ and short_dist < long_dist and
             rsi6 > 70 and down_energy < ENERGY_ZERO_THRESHOLD):
             if ofi_bias == "SHORT" and ofi_strength > 0.6:
@@ -3084,7 +3096,7 @@ class BinanceAnalyzer:
                                                             priority = fake_energy["priority"]
                                                             prob_engine.add(fake_energy["bias"], 4.0)
                                                         else:
-                                                            oversold_cont = OversoldContinuation.detect(rsi6, obv_trend, price, ma25, ma99, volume_ratio, down_energy, ofi["bias"], ofi["strength"])
+                                                            oversold_cont = OversoldContinuation.detect(rsi6, obv_trend, price, ma25, ma99, volume_ratio, down_energy, ofi["bias"], ofi["strength"], liq["long_dist"])
                                                             if oversold_cont["override"]:
                                                                 final_bias = oversold_cont["bias"]
                                                                 final_reason = oversold_cont["reason"]
@@ -3149,7 +3161,7 @@ class BinanceAnalyzer:
                                                                                     overbought_trap_old = OverboughtLiquidityTrap.detect(
                                                                                         liq["short_dist"], liq["long_dist"],
                                                                                         rsi6, up_energy, down_energy,
-                                                                                        ofi["bias"], ofi["strength"], volume_ratio
+                                                                                        ofi["bias"], ofi["strength"], volume_ratio, funding_rate or 0
                                                                                     )
                                                                                     if overbought_trap_old["override"]:
                                                                                         final_bias = overbought_trap_old["bias"]
