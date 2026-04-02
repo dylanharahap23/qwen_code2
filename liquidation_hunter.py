@@ -1250,6 +1250,9 @@ class ExtremeOversoldBounceOverride:
             change_5m < -5.0 and
             ofi_bias == "LONG" and
             ofi_strength > 0.7):
+            # 🔥 Jangan paksa LONG jika long liq sangat dekat (potensi long squeeze / dump lanjut)
+            if long_liq < 1.5:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "LONG",
@@ -1271,6 +1274,9 @@ class ExtremeOverboughtDumpOverride:
             change_5m > 5.0 and
             ofi_bias == "SHORT" and
             ofi_strength > 0.7):
+            # 🔥 Jangan paksa SHORT jika short liq sangat dekat (potensi short squeeze)
+            if short_liq < 1.5:
+                return {"override": False}
             return {
                 "override": True,
                 "bias": "SHORT",
