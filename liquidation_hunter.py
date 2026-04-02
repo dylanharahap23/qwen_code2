@@ -1313,6 +1313,31 @@ class ExhaustionDumpOverride:
         return {"override": False}
 
 
+# ================= NEW: ABSORPTION REVERSAL OVERRIDE (BEAR TRAP) =================
+class AbsorptionReversalOverride:
+    """
+    🔥 Mendeteksi bear trap: OFI SHORT kuat tapi harga tidak turun (down_energy=0),
+    volume rendah, dan short liq dekat. Memaksa LONG.
+    Priority -135 (di atas OFI dominance).
+    """
+    @staticmethod
+    def detect(ofi_bias: str, ofi_strength: float, down_energy: float,
+               change_5m: float, short_liq: float, volume_ratio: float) -> Dict:
+        if (ofi_bias == "SHORT" and
+            ofi_strength > 0.7 and
+            down_energy < 0.01 and
+            volume_ratio < 0.7 and
+            short_liq < 3.0 and
+            change_5m > -1.0):  # harga tidak turun signifikan
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Absorption reversal: strong OFI SHORT {ofi_strength:.2f} but no sellers (down_energy=0) and short liq {short_liq:.2f}% close → bear trap, squeeze up",
+                "priority": -135
+            }
+        return {"override": False}
+
+
 # ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
 class SqueezeContinuationDetector:
     @staticmethod
@@ -3556,6 +3581,17 @@ class BinanceAnalyzer:
                 final_confidence = "ABSOLUTE"
                 final_phase = "EXHAUSTION_DUMP"
                 priority = exhaustion_dump["priority"]
+
+            # ========== ABSORPTION REVERSAL (BEAR TRAP) ==========
+            absorption_reversal = AbsorptionReversalOverride.detect(
+                ofi["bias"], ofi["strength"], down_energy, change_5m, liq["short_dist"], volume_ratio
+            )
+            if absorption_reversal["override"]:
+                final_bias = absorption_reversal["bias"]
+                final_reason = absorption_reversal["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "ABSORPTION_REVERSAL"
+                priority = absorption_reversal["priority"]
 
             # ========== NEW: Oversold/Overbought False Bounce Trap ==========
             oversold_false_bounce = OversoldFalseBounceTrap.detect(
