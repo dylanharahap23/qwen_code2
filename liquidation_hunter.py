@@ -362,6 +362,23 @@ class FakeBounceTrap:
             }
         return {"override": False}
 
+class PostDropBounceOverride:
+    """
+    🔥 Memaksa LONG setelah drop >5% dalam 5m, volume rendah, dan OFI tidak SHORT kuat.
+    Priority -140.
+    """
+    @staticmethod
+    def detect(change_5m: float, volume_ratio: float, ofi_bias: str, ofi_strength: float) -> Dict:
+        if change_5m < -5.0 and volume_ratio < 0.6:
+            if ofi_bias != "SHORT" or ofi_strength < 0.6:
+                return {
+                    "override": True,
+                    "bias": "LONG",
+                    "reason": f"Post-drop bounce: price dropped {change_5m:.1f}% with low volume, no strong selling → bounce likely",
+                    "priority": -140
+                }
+        return {"override": False}
+
 class OrderBookSlope:
     @staticmethod
     def calculate(order_book: Dict) -> Tuple[float, float]:
@@ -616,6 +633,9 @@ class EmptyBookTrapDetector:
             if rsi6_5m >= 75 and volume_ratio < 0.6:
                 return {"override": False}
             if long_dist < short_dist:
+                return {"override": False}
+            # 🔥 Batalkan LONG jika OFI SHORT kuat dan volume rendah
+            if ofi_bias == "SHORT" and ofi_strength > 0.7 and volume_ratio < 0.7:
                 return {"override": False}
             return {
                 "override": True,
@@ -3080,8 +3100,20 @@ class BinanceAnalyzer:
                                                                                 priority = fake_bounce["priority"]
                                                                                 prob_engine.add(fake_bounce["bias"], 4.0)
                                                                             else:
-                                                                                # Continue with other overrides as before
-                                                                                flush = LiquidityFlushConfirmation.detect(liq["short_dist"], liq["long_dist"], agg)
+                                                                                # 10. PostDropBounceOverride (Priority -140)
+                                                                                post_drop_bounce = PostDropBounceOverride.detect(
+                                                                                    change_5m, volume_ratio, ofi["bias"], ofi["strength"]
+                                                                                )
+                                                                                if post_drop_bounce["override"]:
+                                                                                    final_bias = post_drop_bounce["bias"]
+                                                                                    final_reason = post_drop_bounce["reason"]
+                                                                                    final_confidence = "ABSOLUTE"
+                                                                                    final_phase = "POST_DROP_BOUNCE"
+                                                                                    priority = post_drop_bounce["priority"]
+                                                                                    prob_engine.add(post_drop_bounce["bias"], 3.5)
+                                                                                else:
+                                                                                    # Continue with other overrides as before
+                                                                                    flush = LiquidityFlushConfirmation.detect(liq["short_dist"], liq["long_dist"], agg)
                                                                                 if flush["wait"]:
                                                                                     return self._build_result(price, rsi6, rsi14, stoch_k, stoch_d, obv_trend, obv_value,
                                                                                           volume_ratio, change_5m, liq, up_energy, down_energy,
@@ -3500,6 +3532,19 @@ class BinanceAnalyzer:
                     final_confidence = "ABSOLUTE"
                     final_phase = "OVERBOUGHT_FALSE_BOUNCE"
                     priority = overbought_false_bounce["priority"]
+
+            # ========== OFI DOMINANCE OVERRIDE (Priority -145) ==========
+            # 🔥 Jika volume rendah dan OFI sangat kuat (>0.7), paksa arah OFI
+            if volume_ratio < 0.6 and ofi["strength"] > 0.7:
+                if ofi["bias"] == "LONG":
+                    final_bias = "LONG"
+                    final_reason = f"OFI dominance: {ofi['strength']:.2f} with low volume → forcing LONG"
+                elif ofi["bias"] == "SHORT":
+                    final_bias = "SHORT"
+                    final_reason = f"OFI dominance: {ofi['strength']:.2f} with low volume → forcing SHORT"
+                final_confidence = "ABSOLUTE"
+                final_phase = "OFI_DOMINANCE"
+                priority = -145
 
             # ========== MACD DUEL OVERRIDE (WITH LECTURER'S SARAN FILTER) ==========
             if macd_decision["action"] != "NONE":
