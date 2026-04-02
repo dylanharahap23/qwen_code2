@@ -1384,6 +1384,56 @@ class OversoldLiquidityBounce:
         return {"override": False}
 
 
+class LiquidityAbsorptionReversal:
+    """
+    🔥 Memaksa LONG ketika long liq tidak terlalu dekat (>2%), RSI netral (>=30),
+    OFI SHORT kuat, down_energy=0, volume rendah, dan harga turun sedikit.
+    Priority -136 (lebih rendah dari -138 sehingga tidak menimpa bounce,
+    tapi lebih tinggi dari -145 untuk mengalahkan OFI dominance jika perlu).
+    """
+    @staticmethod
+    def detect(long_liq: float, rsi6: float, ofi_bias: str, ofi_strength: float,
+               down_energy: float, volume_ratio: float, change_5m: float) -> Dict:
+        if (long_liq > 2.0 and
+            rsi6 >= 30 and
+            ofi_bias == "SHORT" and
+            ofi_strength > 0.6 and
+            down_energy < 0.01 and
+            volume_ratio < 0.8 and
+            change_5m < 0):  # harga turun sedikit (bisa -0.5 sampai -2%)
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Liquidity absorption reversal: long liq {long_liq:.2f}%, RSI {rsi6:.1f} netral, strong OFI SHORT {ofi_strength:.2f}, no sellers → bear trap, bounce up",
+                "priority": -136
+            }
+        return {"override": False}
+
+
+class OversoldLiquidityContinuation:
+    """
+    🔥 Memaksa SHORT pada oversold dengan long liq sangat dekat (<1.5%),
+    OFI SHORT kuat atau netral, down_energy=0, harga turun.
+    Priority -139 (lebih tinggi dari oversold liquidity bounce -138).
+    """
+    @staticmethod
+    def detect(volume_ratio: float, long_liq: float, down_energy: float,
+               ofi_bias: str, ofi_strength: float, change_5m: float, rsi6: float) -> Dict:
+        if (volume_ratio < 0.7 and
+            long_liq < 1.5 and
+            down_energy < 0.01 and
+            (ofi_bias == "SHORT" or ofi_bias == "NEUTRAL") and
+            change_5m < -1.0 and
+            rsi6 < 35):
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Oversold liquidity continuation: long liq {long_liq:.2f}%, RSI6 {rsi6:.1f}, down_energy=0 → dump continues",
+                "priority": -139
+            }
+        return {"override": False}
+
+
 # ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
 class SqueezeContinuationDetector:
     @staticmethod
@@ -3661,6 +3711,31 @@ class BinanceAnalyzer:
                 final_confidence = "ABSOLUTE"
                 final_phase = "OVERSOLD_LIQUIDITY_BOUNCE"
                 priority = oversold_liquidity_bounce["priority"]
+
+
+            # ========== LIQUIDITY ABSORPTION REVERSAL (BEAR TRAP) ==========
+            liq_absorption_rev = LiquidityAbsorptionReversal.detect(
+                liq["long_dist"], rsi6, ofi["bias"], ofi["strength"],
+                down_energy, volume_ratio, change_5m
+            )
+            if liq_absorption_rev["override"]:
+                final_bias = liq_absorption_rev["bias"]
+                final_reason = liq_absorption_rev["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "LIQUIDITY_ABSORPTION_REV"
+                priority = liq_absorption_rev["priority"]
+
+            # ========== OVERSOLD LIQUIDITY CONTINUATION (FALLING KNIFE) ==========
+            oversold_liquidity_cont = OversoldLiquidityContinuation.detect(
+                volume_ratio, liq["long_dist"], down_energy,
+                ofi["bias"], ofi["strength"], change_5m, rsi6
+            )
+            if oversold_liquidity_cont["override"]:
+                final_bias = oversold_liquidity_cont["bias"]
+                final_reason = oversold_liquidity_cont["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "OVERSOLD_LIQUIDITY_CONT"
+                priority = oversold_liquidity_cont["priority"]
 
             # ========== NEW: Oversold/Overbought False Bounce Trap ==========
             oversold_false_bounce = OversoldFalseBounceTrap.detect(
