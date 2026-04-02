@@ -3381,8 +3381,8 @@ class BinanceAnalyzer:
                                                                     final_phase = "SQUEEZE_CONTINUATION"
                                                                     priority = squeeze_cont["priority"]
                                                                     prob_engine.add(squeeze_cont["bias"], 5.0)
-                                                                else:
-                                                                    # 6.5. FLUSH EXHAUSTION REVERSAL (Priority -250)
+
+                                                                # 6.5. FLUSH EXHAUSTION REVERSAL (Priority -250)
                                                                 flush_exhaust = FlushExhaustionReversal.detect(
                                                                     change_5m, rsi6, volume_ratio,
                                                                     down_energy, liq["long_dist"]
@@ -3912,19 +3912,18 @@ class BinanceAnalyzer:
                 final_phase = "OVERSOLD_LIQUIDITY_CONT"
                 priority = oversold_liquidity_cont["priority"]
 
-            else:
-                # ========== FALLING KNIFE OVERRIDE (Priority -139) ==========
-                falling_knife = FallingKnifeOverride.detect(
-                    rsi6, rsi6_5m, liq["long_dist"], volume_ratio,
-                    up_energy, down_energy, algo_type["bias"], hft_6pct["bias"], change_5m
-                )
-                if falling_knife["override"]:
-                    final_bias = falling_knife["bias"]
-                    final_reason = falling_knife["reason"]
-                    final_confidence = "ABSOLUTE"
-                    final_phase = "FALLING_KNIFE_OVERRIDE"
-                    priority = falling_knife["priority"]
-                else:
+            # ========== FALLING KNIFE OVERRIDE (Priority -139) ==========
+            falling_knife = FallingKnifeOverride.detect(
+                rsi6, rsi6_5m, liq["long_dist"], volume_ratio,
+                up_energy, down_energy, algo_type["bias"], hft_6pct["bias"], change_5m
+            )
+            if falling_knife["override"]:
+                final_bias = falling_knife["bias"]
+                final_reason = falling_knife["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "FALLING_KNIFE_OVERRIDE"
+                priority = falling_knife["priority"]
+
             # ========== EXTREME OVERBOUGHT DISTRIBUTION (PRIORITY -270) ==========
             extreme_overbought_dist = ExtremeOverboughtDistribution.detect(
                 rsi6, rsi6_5m, volume_ratio,
@@ -3950,19 +3949,19 @@ class BinanceAnalyzer:
                 final_confidence = "ABSOLUTE"
                 final_phase = "TRAPPED_SHORT_SQUEEZE"
                 priority = trapped_short["priority"]
-            else:
-                # ========== TRAPPED LONG SQUEEZE (Mirror, Priority -160) ==========
-                trapped_long = TrappedLongSqueeze.detect(
-                    ofi["bias"], ofi["strength"], up_energy,
-                    down_energy, volume_ratio, liq["short_dist"],
-                    liq["long_dist"], change_5m
-                )
-                if trapped_long["override"]:
-                    final_bias = trapped_long["bias"]
-                    final_reason = trapped_long["reason"]
-                    final_confidence = "ABSOLUTE"
-                    final_phase = "TRAPPED_LONG_SQUEEZE"
-                    priority = trapped_long["priority"]
+
+            # ========== TRAPPED LONG SQUEEZE (Mirror, Priority -160) ==========
+            trapped_long = TrappedLongSqueeze.detect(
+                ofi["bias"], ofi["strength"], up_energy,
+                down_energy, volume_ratio, liq["short_dist"],
+                liq["long_dist"], change_5m
+            )
+            if trapped_long["override"]:
+                final_bias = trapped_long["bias"]
+                final_reason = trapped_long["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "TRAPPED_LONG_SQUEEZE"
+                priority = trapped_long["priority"]
 
             # ========== NEW: Oversold/Overbought False Bounce Trap ==========
             oversold_false_bounce = OversoldFalseBounceTrap.detect(
