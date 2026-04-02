@@ -1287,6 +1287,32 @@ class ExtremeOverboughtDumpOverride:
         return {"override": False}
 
 
+# ================= NEW: EXHAUSTION DUMP OVERRIDE (BLOW-OFF TOP) =================
+class ExhaustionDumpOverride:
+    """
+    🔥 Mendeteksi blow-off top: harga naik tinggi, volume rendah, energy collapse.
+    Memaksa SHORT.
+    Priority -130.
+    """
+    @staticmethod
+    def detect(rsi6_5m: float, volume_ratio: float, change_5m: float,
+               up_energy: float, short_liq: float) -> Dict:
+        if (rsi6_5m > 85 and
+            volume_ratio < 0.5 and
+            change_5m > 5.0 and
+            up_energy < 0.1):
+            # Jangan paksa SHORT jika short liq sangat dekat (masih squeeze)
+            if short_liq < 1.0:
+                return {"override": False}
+            return {
+                "override": True,
+                "bias": "SHORT",
+                "reason": f"Exhaustion dump: price up {change_5m:.1f}%, RSI5m {rsi6_5m:.1f}, volume {volume_ratio:.2f}x, energy collapsed → dump imminent",
+                "priority": -130
+            }
+        return {"override": False}
+
+
 # ================= NEW: SQUEEZE CONTINUATION DETECTOR =================
 class SqueezeContinuationDetector:
     @staticmethod
@@ -3519,6 +3545,17 @@ class BinanceAnalyzer:
                     final_confidence = "ABSOLUTE"
                     final_phase = "EXTREME_OVERBOUGHT_DUMP"
                     priority = extreme_overbought_dump["priority"]
+
+            # ========== EXHAUSTION DUMP (BLOW-OFF TOP) ==========
+            exhaustion_dump = ExhaustionDumpOverride.detect(
+                rsi6_5m, volume_ratio, change_5m, up_energy, liq["short_dist"]
+            )
+            if exhaustion_dump["override"]:
+                final_bias = exhaustion_dump["bias"]
+                final_reason = exhaustion_dump["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "EXHAUSTION_DUMP"
+                priority = exhaustion_dump["priority"]
 
             # ========== NEW: Oversold/Overbought False Bounce Trap ==========
             oversold_false_bounce = OversoldFalseBounceTrap.detect(
