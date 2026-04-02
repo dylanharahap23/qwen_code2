@@ -1313,6 +1313,31 @@ class ExhaustionDumpOverride:
         return {"override": False}
 
 
+# ================= NEW: ULTRA CLOSE SQUEEZE OVERRIDE =================
+class UltraCloseSqueezeOverride:
+    """
+    🔥 Memaksa LONG ketika short liq sangat dekat (<0.5%), OFI SHORT kuat,
+    down_energy=0, volume rendah, dan harga tidak turun signifikan.
+    Priority -155 (lebih tinggi dari OFI dominance -145).
+    """
+    @staticmethod
+    def detect(short_liq: float, ofi_bias: str, ofi_strength: float,
+               down_energy: float, volume_ratio: float, change_5m: float) -> Dict:
+        if (short_liq < 0.5 and
+            ofi_bias == "SHORT" and
+            ofi_strength > 0.7 and
+            down_energy < 0.01 and
+            volume_ratio < 0.7 and
+            change_5m > -1.0):  # harga tidak turun drastis
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Ultra close squeeze: short liq {short_liq:.2f}%, strong OFI SHORT {ofi_strength:.2f}, no sellers → forced LONG",
+                "priority": -155
+            }
+        return {"override": False}
+
+
 # ================= NEW: ABSORPTION REVERSAL OVERRIDE (BEAR TRAP) =================
 class AbsorptionReversalOverride:
     """
@@ -3602,6 +3627,18 @@ class BinanceAnalyzer:
                 final_confidence = "ABSOLUTE"
                 final_phase = "EXHAUSTION_DUMP"
                 priority = exhaustion_dump["priority"]
+
+            # ========== ULTRA CLOSE SQUEEZE (SHORT LIQ <0.5%) ==========
+            ultra_squeeze = UltraCloseSqueezeOverride.detect(
+                liq["short_dist"], ofi["bias"], ofi["strength"],
+                down_energy, volume_ratio, change_5m
+            )
+            if ultra_squeeze["override"]:
+                final_bias = ultra_squeeze["bias"]
+                final_reason = ultra_squeeze["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "ULTRA_CLOSE_SQUEEZE"
+                priority = ultra_squeeze["priority"]
 
             # ========== ABSORPTION REVERSAL (BEAR TRAP) ==========
             absorption_reversal = AbsorptionReversalOverride.detect(
