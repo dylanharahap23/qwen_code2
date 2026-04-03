@@ -1622,6 +1622,24 @@ class FallingKnifeOverride:
         return {"override": False}
 
 
+class ExtremeOversoldCloseLiquidityBounce:
+    """
+    🔥 Memaksa LONG ketika long liq sangat dekat (<0.5%) dan oversold (RSI < 25)
+    serta ada buy pressure (up_energy > 0). Ini mengalahkan oversold continuation.
+    Priority -141 (lebih tinggi dari OversoldLiquidityContinuation -139)
+    """
+    @staticmethod
+    def detect(rsi6: float, long_liq: float, up_energy: float, change_5m: float) -> Dict:
+        if (long_liq < 0.5 and rsi6 < 25 and up_energy > 0 and change_5m < 0):
+            return {
+                "override": True,
+                "bias": "LONG",
+                "reason": f"Extreme oversold with very close long liq ({long_liq:.2f}%), RSI {rsi6:.1f}, up_energy={up_energy:.2f} → bounce imminent",
+                "priority": -141
+            }
+        return {"override": False}
+
+
 class ExtremeOverboughtDistribution:
     """
     🔥 DETECTS EXTREME OVERBOUGHT DISTRIBUTION
@@ -4100,6 +4118,17 @@ class BinanceAnalyzer:
                 final_confidence = "ABSOLUTE"
                 final_phase = "FALLING_KNIFE_OVERRIDE"
                 priority = falling_knife["priority"]
+
+            # ========== EXTREME OVERSOLD CLOSE LIQUIDITY BOUNCE (Priority -141) ==========
+            extreme_oversold_bounce = ExtremeOversoldCloseLiquidityBounce.detect(
+                rsi6, liq["long_dist"], up_energy, change_5m
+            )
+            if extreme_oversold_bounce["override"]:
+                final_bias = extreme_oversold_bounce["bias"]
+                final_reason = extreme_oversold_bounce["reason"]
+                final_confidence = "ABSOLUTE"
+                final_phase = "EXTREME_OVERSOLD_CLOSE_LIQ_BOUNCE"
+                priority = extreme_oversold_bounce["priority"]
 
             # ========== EXTREME OVERBOUGHT DISTRIBUTION (PRIORITY -270) ==========
             extreme_overbought_dist = ExtremeOverboughtDistribution.detect(
