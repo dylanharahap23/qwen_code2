@@ -15,19 +15,19 @@ venv/
 # Logs
 *.log
 
-# Temporary files
-*.tmp
-*.swp
-*.swo
-
-# Editors
+# Editor
 .vscode/
 .idea/
+*.swp
+*.swo
+*.tmp
 
 # Build artifacts
 dist/
 build/
-*.so
-*.dylib
-*.dll
+*.egg-info/
+.coverage
+htmlcov/
+.mypy_cache/
+.pytest_cache/
 ```
