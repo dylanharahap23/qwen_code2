@@ -3490,99 +3490,99 @@ class BinanceAnalyzer:
                                                                                 down_energy, up_energy, change_5m,
                                                                                 liq["short_dist"], liq["long_dist"]
                                                                             )
-                                                            if empty_book_mom["override"]:
-                                                                final_bias = empty_book_mom["bias"]
-                                                                final_reason = empty_book_mom["reason"]
-                                                                final_confidence = "ABSOLUTE"
-                                                                final_phase = "EMPTY_BOOK_MOMENTUM"
-                                                                priority = empty_book_mom["priority"]
-                                                                prob_engine.add(empty_book_mom["bias"], 7.5)
-                                                            else:
-                                                                # 6. Squeeze Continuation Detector (existing, Priority -265)
-                                                                squeeze_cont = SqueezeContinuationDetector.detect(
-                                                                    rsi6_5m, change_5m, volume_ratio,
-                                                                    liq["short_dist"], up_energy, down_energy,
-                                                                    ofi["bias"], ofi["strength"], bid_slope, ask_slope
-                                                                )
-                                                                if squeeze_cont["override"]:
-                                                                    final_bias = squeeze_cont["bias"]
-                                                                    final_reason = squeeze_cont["reason"]
-                                                                    final_confidence = "ABSOLUTE"
-                                                                    final_phase = "SQUEEZE_CONTINUATION"
-                                                                    priority = squeeze_cont["priority"]
-                                                                    prob_engine.add(squeeze_cont["bias"], 5.0)
-
-                                                                # 6.5. FLUSH EXHAUSTION REVERSAL (Priority -250)
-                                                                flush_exhaust = FlushExhaustionReversal.detect(
-                                                                    change_5m, rsi6, volume_ratio,
-                                                                    down_energy, liq["long_dist"]
-                                                                )
-                                                                if flush_exhaust["override"]:
-                                                                    final_bias = flush_exhaust["bias"]
-                                                                    final_reason = flush_exhaust["reason"]
-                                                                    final_confidence = "ABSOLUTE"
-                                                                    final_phase = "FLUSH_EXHAUSTION"
-                                                                    priority = flush_exhaust["priority"]
-                                                                    prob_engine.add(flush_exhaust["bias"], 4.0)
-                                                                else:
-                                                                    # 7. Cascade Dump Detector
-                                                                    cascade = CascadeDumpDetector.detect(change_5m, liq["short_dist"], down_energy, volume_ratio)
-                                                                    if cascade["override"]:
-                                                                        final_bias = cascade["bias"]
-                                                                        final_reason = cascade["reason"]
-                                                                        final_confidence = "ABSOLUTE"
-                                                                        final_phase = "CASCADE_DUMP"
-                                                                        priority = cascade["priority"]
-                                                                        prob_engine.add(cascade["bias"], 5.0)
-                                                                    else:
-                                                                        # 8. Low Volume Continuation
-                                                                        low_vol_cont = LowVolumeContinuation.detect(volume_ratio, obv_trend, price, ma25, ma99, down_energy)
-                                                                        if low_vol_cont["override"]:
-                                                                            final_bias = low_vol_cont["bias"]
-                                                                            final_reason = low_vol_cont["reason"]
-                                                                            final_confidence = "ABSOLUTE"
-                                                                            final_phase = "LOW_VOL_CONT"
-                                                                            priority = low_vol_cont["priority"]
-                                                                            prob_engine.add(low_vol_cont["bias"], 4.0)
-                                                                        else:
-                                                                            # 9. Fake Bounce Trap
-                                                                            fake_bounce = FakeBounceTrap.detect(
-                                                                                rsi6, change_5m, volume_ratio,
-                                                                                liq["short_dist"], liq["long_dist"],
-                                                                                up_energy, down_energy,
-                                                                                ofi["bias"], ofi["strength"]
-                                                                            )
-                                                                            if fake_bounce["override"]:
-                                                                                final_bias = fake_bounce["bias"]
-                                                                                final_reason = fake_bounce["reason"]
+                                                                            if empty_book_mom["override"]:
+                                                                                final_bias = empty_book_mom["bias"]
+                                                                                final_reason = empty_book_mom["reason"]
                                                                                 final_confidence = "ABSOLUTE"
-                                                                                final_phase = "FAKE_BOUNCE"
-                                                                                priority = fake_bounce["priority"]
-                                                                                prob_engine.add(fake_bounce["bias"], 4.0)
+                                                                                final_phase = "EMPTY_BOOK_MOMENTUM"
+                                                                                priority = empty_book_mom["priority"]
+                                                                                prob_engine.add(empty_book_mom["bias"], 7.5)
                                                                             else:
-                                                                                # 10. PostDropBounceOverride (Priority -140)
-                                                                                post_drop_bounce = PostDropBounceOverride.detect(
-                                                                                    change_5m, volume_ratio, ofi["bias"], ofi["strength"]
+                                                                                # 6. Squeeze Continuation Detector (existing, Priority -265)
+                                                                                squeeze_cont = SqueezeContinuationDetector.detect(
+                                                                                    rsi6_5m, change_5m, volume_ratio,
+                                                                                    liq["short_dist"], up_energy, down_energy,
+                                                                                    ofi["bias"], ofi["strength"], bid_slope, ask_slope
                                                                                 )
-                                                                                if post_drop_bounce["override"]:
-                                                                                    final_bias = post_drop_bounce["bias"]
-                                                                                    final_reason = post_drop_bounce["reason"]
+                                                                                if squeeze_cont["override"]:
+                                                                                    final_bias = squeeze_cont["bias"]
+                                                                                    final_reason = squeeze_cont["reason"]
                                                                                     final_confidence = "ABSOLUTE"
-                                                                                    final_phase = "POST_DROP_BOUNCE"
-                                                                                    priority = post_drop_bounce["priority"]
-                                                                                    prob_engine.add(post_drop_bounce["bias"], 3.5)
-                                                                                else:
-                                                                                    # Continue with other overrides as before
-                                                                                    flush = LiquidityFlushConfirmation.detect(liq["short_dist"], liq["long_dist"], agg)
-                                                                                if flush["wait"]:
-                                                                                    return self._build_result(price, rsi6, rsi14, stoch_k, stoch_d, obv_trend, obv_value,
-                                                                                          volume_ratio, change_5m, liq, up_energy, down_energy,
-                                                                                          agg, flow, "WAIT", "ABSOLUTE", flush["reason"],
-                                                                                          "FLUSH_CONFIRMATION", -255, ofi, iceberg, funding_trap, liq_heat,
-                                                                                          cross_lead, None, funding_rate, latest_volume, volume_ma10, rsi6_5m)
+                                                                                    final_phase = "SQUEEZE_CONTINUATION"
+                                                                                    priority = squeeze_cont["priority"]
+                                                                                    prob_engine.add(squeeze_cont["bias"], 5.0)
 
-                                                                                dead_market = DeadMarketProximityRule.detect(agg, flow, liq["short_dist"], liq["long_dist"],
-                                                                                     up_energy, down_energy)
+                                                                                # 6.5. FLUSH EXHAUSTION REVERSAL (Priority -250)
+                                                                                flush_exhaust = FlushExhaustionReversal.detect(
+                                                                                    change_5m, rsi6, volume_ratio,
+                                                                                    down_energy, liq["long_dist"]
+                                                                                )
+                                                                                if flush_exhaust["override"]:
+                                                                                    final_bias = flush_exhaust["bias"]
+                                                                                    final_reason = flush_exhaust["reason"]
+                                                                                    final_confidence = "ABSOLUTE"
+                                                                                    final_phase = "FLUSH_EXHAUSTION"
+                                                                                    priority = flush_exhaust["priority"]
+                                                                                    prob_engine.add(flush_exhaust["bias"], 4.0)
+                                                                                else:
+                                                                                    # 7. Cascade Dump Detector
+                                                                                    cascade = CascadeDumpDetector.detect(change_5m, liq["short_dist"], down_energy, volume_ratio)
+                                                                                    if cascade["override"]:
+                                                                                        final_bias = cascade["bias"]
+                                                                                        final_reason = cascade["reason"]
+                                                                                        final_confidence = "ABSOLUTE"
+                                                                                        final_phase = "CASCADE_DUMP"
+                                                                                        priority = cascade["priority"]
+                                                                                        prob_engine.add(cascade["bias"], 5.0)
+                                                                                    else:
+                                                                                        # 8. Low Volume Continuation
+                                                                                        low_vol_cont = LowVolumeContinuation.detect(volume_ratio, obv_trend, price, ma25, ma99, down_energy)
+                                                                                        if low_vol_cont["override"]:
+                                                                                            final_bias = low_vol_cont["bias"]
+                                                                                            final_reason = low_vol_cont["reason"]
+                                                                                            final_confidence = "ABSOLUTE"
+                                                                                            final_phase = "LOW_VOL_CONT"
+                                                                                            priority = low_vol_cont["priority"]
+                                                                                            prob_engine.add(low_vol_cont["bias"], 4.0)
+                                                                                        else:
+                                                                                            # 9. Fake Bounce Trap
+                                                                                            fake_bounce = FakeBounceTrap.detect(
+                                                                                                rsi6, change_5m, volume_ratio,
+                                                                                                liq["short_dist"], liq["long_dist"],
+                                                                                                up_energy, down_energy,
+                                                                                                ofi["bias"], ofi["strength"]
+                                                                                            )
+                                                                                            if fake_bounce["override"]:
+                                                                                                final_bias = fake_bounce["bias"]
+                                                                                                final_reason = fake_bounce["reason"]
+                                                                                                final_confidence = "ABSOLUTE"
+                                                                                                final_phase = "FAKE_BOUNCE"
+                                                                                                priority = fake_bounce["priority"]
+                                                                                                prob_engine.add(fake_bounce["bias"], 4.0)
+                                                                                            else:
+                                                                                                # 10. PostDropBounceOverride (Priority -140)
+                                                                                                post_drop_bounce = PostDropBounceOverride.detect(
+                                                                                                    change_5m, volume_ratio, ofi["bias"], ofi["strength"]
+                                                                                                )
+                                                                                                if post_drop_bounce["override"]:
+                                                                                                    final_bias = post_drop_bounce["bias"]
+                                                                                                    final_reason = post_drop_bounce["reason"]
+                                                                                                    final_confidence = "ABSOLUTE"
+                                                                                                    final_phase = "POST_DROP_BOUNCE"
+                                                                                                    priority = post_drop_bounce["priority"]
+                                                                                                    prob_engine.add(post_drop_bounce["bias"], 3.5)
+                                                                                                else:
+                                                                                                    # Continue with other overrides as before
+                                                                                                    flush = LiquidityFlushConfirmation.detect(liq["short_dist"], liq["long_dist"], agg)
+                                                                                                if flush["wait"]:
+                                                                                                    return self._build_result(price, rsi6, rsi14, stoch_k, stoch_d, obv_trend, obv_value,
+                                                                                                          volume_ratio, change_5m, liq, up_energy, down_energy,
+                                                                                                          agg, flow, "WAIT", "ABSOLUTE", flush["reason"],
+                                                                                                          "FLUSH_CONFIRMATION", -255, ofi, iceberg, funding_trap, liq_heat,
+                                                                                                          cross_lead, None, funding_rate, latest_volume, volume_ma10, rsi6_5m)
+
+                                                                                                dead_market = DeadMarketProximityRule.detect(agg, flow, liq["short_dist"], liq["long_dist"],
+                                                                                                     up_energy, down_energy)
                                         if dead_market["override"]:
                                             final_bias = dead_market["bias"]
                                             final_reason = dead_market["reason"]
