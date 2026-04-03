@@ -12,22 +12,17 @@ venv/
 .env.local
 *.env.*
 
-# Logs
+# Logs and temporary files
 *.log
+*.tmp
+*.swp
 
-# Editor
+# Editors
 .vscode/
 .idea/
-*.swp
-*.swo
-*.tmp
 
 # Build artifacts
 dist/
 build/
-*.egg-info/
-.coverage
-htmlcov/
-.mypy_cache/
-.pytest_cache/
+target/
 ```

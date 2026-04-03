@@ -532,8 +532,14 @@ class OverboughtDistributionTrap:
             }
         
         # Jika short liq sangat dekat dan lebih dekat dari long liq → liquidity mengarah LONG, jangan SHORT
+        # 🔥 TAPI jika overbought ekstrem (RSI > 75) dan volume rendah, tetap SHORT (distribution trap)
         if short_dist < 2.0 and short_dist < long_dist:
-            return {"override": False}
+            # Pengecualian untuk overbought ekstrem dengan volume rendah
+            if rsi6 > 75 and volume_ratio < 0.7:
+                # tetap lanjut ke pengecekan berikutnya, jangan return False
+                pass
+            else:
+                return {"override": False}
         
         # Kasus 1: Overbought + short liq dekat + volume rendah + tidak ada bid support
         if (rsi6 > 70 and
@@ -3362,6 +3368,7 @@ class BinanceAnalyzer:
                         exhausted_liquidity = {"override": False}  # <-- For ExhaustedLiquidityReversal
                         near_exhausted = {"override": False}       # <-- For NearExhaustedLiquidityReversal
                         squeeze_trap = {"override": False}         # <-- For ShortSqueezeTrapOverride
+                        overbought_trap_old = {"override": False}  # <-- For OverboughtLiquidityTrap (prevent UnboundLocalError)
 
                         # ========== HIGH PRIORITY OVERRIDES (with priority order) ==========
                         # Priority ladder (highest to lowest):
