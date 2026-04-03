@@ -3745,7 +3745,8 @@ class BinanceAnalyzer:
                                                                                                                                                     priority = liq_priority_energy["priority"]
                                                                                                                                                     prob_engine.add(liq_priority_energy["bias"], 3.0)
                                                                                                                                                 else:
-                                                                                    overbought_trap_old = OverboughtLiquidityTrap.detect(
+                                                                                                                                                    pass
+                                                                                                                                                    overbought_trap_old = OverboughtLiquidityTrap.detect(
                                                                                         liq["short_dist"], liq["long_dist"],
                                                                                         rsi6, up_energy, down_energy,
                                                                                         ofi["bias"], ofi["strength"], volume_ratio, funding_rate or 0
